@@ -3,6 +3,7 @@
 Includes: text-format auto-edit hook (bold/italic/underline/strike/spoiler)
 attached to USER clients (self-bot), not the bot client.
 Also includes /casino command to open the user casino web panel.
+Casino listener is installed on the user client after login.
 """
 import asyncio
 import io
@@ -817,12 +818,7 @@ def _register_handlers(rt: BotRuntime) -> None:
 
 
 def _register_user_client_format_hooks(rt: BotRuntime, user_id: int, client):
-    """Attach the text-format hook to a user (self-bot) client.
-
-    Outgoing messages from the user come through the USER client, not the
-    bot client. So we hook `outgoing=True` on each user client after it
-    connects / logs in.
-    """
+    """Attach the text-format hook to a user (self-bot) client."""
     if client is None:
         return
     if getattr(client, "_format_hook_installed", False):
@@ -875,6 +871,11 @@ async def _finish_login(rt: BotRuntime, uid: int, event, st: dict) -> None:
                 _register_user_client_format_hooks(rt, uid, client)
             except Exception as e:
                 log_bot.warning(f"could not install format hook after login: {e}")
+            try:
+                from .casino import install_casino_listener
+                install_casino_listener(rt, uid, client)
+            except Exception as e:
+                log_bot.warning(f"could not install casino listener after login: {e}")
     except Exception as e:
         log_bot.warning(f"could not persist session string: {e}")
 

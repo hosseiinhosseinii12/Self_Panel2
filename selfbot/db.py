@@ -239,6 +239,7 @@ CREATE TABLE IF NOT EXISTS casino_config (
     user_id INTEGER PRIMARY KEY,
     enabled INTEGER DEFAULT 0,
     chat_id INTEGER,
+    panel_msg_id INTEGER DEFAULT 0,
     initial_bet INTEGER DEFAULT 100000,
     current_bet INTEGER DEFAULT 100000,
     max_bet INTEGER DEFAULT 100000000,
@@ -293,6 +294,8 @@ def init_db() -> None:
     with _init_lock:
         conn = get_conn()
         conn.executescript(SCHEMA)
+
+        # ensure newer columns exist on 'users'
         cur = conn.execute("PRAGMA table_info(users)")
         cols = {row["name"] for row in cur.fetchall()}
         wanted = {
@@ -315,6 +318,20 @@ def init_db() -> None:
                     conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
                 except Exception:
                     pass
+
+        # ensure newer columns exist on 'casino_config'
+        cur = conn.execute("PRAGMA table_info(casino_config)")
+        ccols = {row["name"] for row in cur.fetchall()}
+        cwanted = {
+            "panel_msg_id": "INTEGER DEFAULT 0",
+        }
+        for col, decl in cwanted.items():
+            if col not in ccols:
+                try:
+                    conn.execute(f"ALTER TABLE casino_config ADD COLUMN {col} {decl}")
+                except Exception:
+                    pass
+
         _initialized = True
 
 
@@ -805,7 +822,7 @@ def clear_user_otp(user_id: int) -> None:
 
 
 # ===========================================================================
-# Text format
+# Text format settings
 # ===========================================================================
 def get_text_format(user_id: int) -> Optional[dict]:
     _ensure_ready()

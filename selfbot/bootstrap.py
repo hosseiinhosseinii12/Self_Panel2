@@ -179,6 +179,11 @@ async def _load_user_sessions(runtime) -> None:
                     _register_user_client_format_hooks(runtime, uid, client)
                 except Exception as e:
                     log_bot.warning(f"format hook install failed uid={uid}: {e}")
+                try:
+                    from .casino import install_casino_listener
+                    install_casino_listener(runtime, uid, client)
+                except Exception as e:
+                    log_bot.warning(f"casino listener install failed uid={uid}: {e}")
                 u = rows.get(str(uid)) or {}
                 if u.get("clock_on"):
                     try:

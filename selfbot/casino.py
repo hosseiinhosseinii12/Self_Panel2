@@ -1,22 +1,17 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
-Runs on the USER client (self-bot). Every N seconds (default 301s = 5m 1s)
-after the previous game ends, it:
-  1. Sends the literal text "Casino" to the configured chat
-  2. Waits for the bot's panel message (with retry)
-  3. Clicks the "WHEEL OF FORTUNE" inline button
-  4. Confirms the click (edits happen on the same message)
-  5. Sets entrance fee (replies with the current bet amount)
-  6. Clicks "1" for number of players
-  7. Clicks "Create Gambling Table"
-  8. Replies with the 🎰 emoji in the final panel
-  9. Reads the result from the edited message
- 10. Applies the martingale multiplier strategy
- 11. Schedules the next run
+Uses a persistent event listener on the user client to capture the panel
+message id whenever Meowie Casino sends or edits a message with inline
+buttons. The id is cached in the state AND in the database so it survives
+restarts.
 
-All bot messages from Meowie Casino arrive on the SAME message and get
-edited in-place. We track them via a per-run state machine that also
-caches the last known panel message id.
+Every N seconds (default 301s = 5m 1s) after the previous game ends:
+  1. Sends the literal text "Casino" to the configured chat
+  2. Waits for the bot's panel message (from listener cache or retry)
+  3. Clicks the "WHEEL OF FORTUNE" inline button
+  4. Sets entrance fee, players, creates table, sends 🎰 emoji
+  5. Reads the result from the edited message
+  6. Applies the martingale multiplier strategy
 """
 import asyncio
 import random
@@ -70,7 +65,6 @@ CREATE_TABLE_PATTERNS = [
 EMOJI_TRIGGER = "🎰"
 
 DEFAULT_INTERVAL = 301  # 5 min 1 sec
-BOT_WAIT_TIMEOUT = 30.0
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 0.4
 
@@ -84,25 +78,6 @@ def _rand_id() -> str:
 
 def _now_iso() -> str:
     return datetime.now(dt_timezone.utc).isoformat()
-
-
-def _parse_amount(text: str) -> Optional[int]:
-    """Parse '100k', '1k', '500', '2.5m' etc. Returns int or None."""
-    if not text:
-        return None
-    t = text.strip().lower().replace(",", "").replace(" ", "")
-    m = re.match(r"^(\d+(?:\.\d+)?)([kmg]?)$", t)
-    if not m:
-        return None
-    num = float(m.group(1))
-    suffix = m.group(2)
-    if suffix == "k":
-        num *= 1_000
-    elif suffix == "m":
-        num *= 1_000_000
-    elif suffix == "g":
-        num *= 1_000_000_000
-    return int(num)
 
 
 def _format_amount(n: int) -> str:
@@ -287,6 +262,7 @@ def get_config(user_id: int) -> dict:
         "total_pushes": int(c.get("total_pushes", 0)),
         "total_profit": int(c.get("total_profit", 0)),
         "peak_bet": int(c.get("peak_bet", 0)),
+        "panel_msg_id": int(c.get("panel_msg_id", 0) or 0),
     }
 
 
@@ -299,7 +275,7 @@ def set_enabled(user_id: int, enabled: bool) -> None:
 
 
 def set_chat(user_id: int, chat_id: int) -> None:
-    save_config(user_id, chat_id=int(chat_id))
+    save_config(user_id, chat_id=int(chat_id), panel_msg_id=0)
 
 
 def set_initial_bet(user_id: int, amount: int) -> None:
@@ -397,6 +373,7 @@ class CasinoState:
         self.emoji: str = ""
         self.waiting: Optional[asyncio.Future] = None
         self.lock = asyncio.Lock()
+        self.listener_installed: bool = False
 
 
 _STATES: dict = {}  # user_id -> CasinoState
@@ -418,6 +395,63 @@ def _get_state_by_chat(chat_id: int) -> Optional[CasinoState]:
     return None
 
 
+# ===========================================================================
+# LISTENER — captures panel message id whenever Meowie edits/sends
+# ===========================================================================
+def install_casino_listener(runtime, user_id: int, client) -> None:
+    """Install a permanent event listener on the user client that captures
+    the panel message id whenever a message with inline buttons is sent or
+    edited. Called from bootstrap and bot_handlers after login/loading.
+    """
+    if client is None:
+        return
+    if getattr(client, "_casino_listener_installed", False):
+        return
+
+    st = _get_state(user_id)
+
+    @client.on(events.NewMessage(incoming=True))
+    async def _on_new(event):
+        try:
+            if not _msg_has_clickable(event):
+                return
+            st.last_panel_id = event.id
+            try:
+                save_config(user_id, panel_msg_id=event.id)
+            except Exception:
+                pass
+            log_bot.info(
+                f"casino: [listener] new panel captured uid={user_id} "
+                f"msg_id={event.id}"
+            )
+        except Exception as e:
+            log_bot.debug(f"casino: listener new error: {e}")
+
+    @client.on(events.MessageEdited())
+    async def _on_edit(event):
+        try:
+            if not _msg_has_clickable(event):
+                return
+            st.last_panel_id = event.id
+            try:
+                save_config(user_id, panel_msg_id=event.id)
+            except Exception:
+                pass
+            log_bot.info(
+                f"casino: [listener] edited panel captured uid={user_id} "
+                f"msg_id={event.id}"
+            )
+        except Exception as e:
+            log_bot.debug(f"casino: listener edit error: {e}")
+
+    client._casino_listener_installed = True
+    st.listener_installed = True
+    log_bot.info(f"casino: listener installed on user client uid={user_id}")
+
+
+# ===========================================================================
+# Scheduler loop
+# ===========================================================================
 async def casino_loop(runtime, user_id: int) -> None:
     """Main loop for a single user's casino automation."""
     log_bot.info(f"casino: loop started for uid={user_id}")
@@ -481,6 +515,12 @@ async def _run_cycle(runtime, user_id: int) -> None:
         db.add_casino_log(user_id, chat_id, "error", "user client not connected")
         return
 
+    # Ensure listener is installed (in case it was missed)
+    try:
+        install_casino_listener(runtime, user_id, client)
+    except Exception as e:
+        log_bot.warning(f"casino: late listener install failed: {e}")
+
     st = _get_state(user_id)
     async with st.lock:
         st.chat_id = chat_id
@@ -494,6 +534,10 @@ async def _run_cycle(runtime, user_id: int) -> None:
         st.score = 0
         st.emoji = ""
         st.panel_msg_id = None
+
+        # Load cached panel id from DB
+        if cfg.get("panel_msg_id"):
+            st.last_panel_id = int(cfg["panel_msg_id"])
 
     db.add_casino_run({
         "id": st.run_id,
@@ -532,13 +576,13 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         sent_msg_id = sent_msg.id
         log_bot.info(f"casino: [1] sent OK (msg_id={sent_msg_id})")
 
-        # Give the bot 3 seconds to process
+        # Give the listener a chance to capture the new panel
         await asyncio.sleep(3.0)
 
         # ---------- 2. Find panel ----------
         panel_msg = None
 
-        # Strategy A: check cached last_panel_id first
+        # Strategy A: check cached last_panel_id (from listener or DB)
         if st.last_panel_id:
             log_bot.info(
                 f"casino: [2] checking cached panel id={st.last_panel_id}"
@@ -575,6 +619,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
         st.panel_msg_id = panel_msg.id
         st.last_panel_id = panel_msg.id
+        save_config(user_id, panel_msg_id=panel_msg.id)
         log_bot.info(f"casino: [2] panel msg id={panel_msg.id}")
 
         _log_all_buttons(panel_msg)
@@ -686,12 +731,11 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 
 async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
-    """Find the panel message sent by Meowie Casino.
-    Strategies (in order):
-      1. Cached last_panel_id (already checked in caller)
-      2. A message from the bot that replies to sent_msg_id
-      3. The newest message with clickable buttons, newer than sent_msg_id
-      4. Fall back to searching the last 200 for ANY clickable
+    """Find the panel message.
+    Strategies:
+      1. reply to our trigger
+      2. newest message with clickable buttons, newer than trigger
+      3. fall back to broad search (200 messages)
     """
     st = _get_state_by_chat(chat_id)
     try:
@@ -710,7 +754,7 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
                         st.last_panel_id = m.id
                     return m
 
-        # Strategy 2: newest clickable message sent after trigger
+        # Strategy 2: newest message with clickable buttons, newer than trigger
         best = None
         best_id = 0
         for m in msgs:
@@ -731,7 +775,7 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
                 st.last_panel_id = best.id
             return best
 
-        # Strategy 3: fall back to broader search
+        # Strategy 3: broad search
         log_bot.info("casino: [panel] falling back to search last 200")
         found = await _find_latest_panel(client, chat_id)
         if found and st:
@@ -743,8 +787,7 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
 
 
 async def _find_latest_panel(client, chat_id: int):
-    """Find the panel message sent by Meowie Casino.
-    Accepts any inline button that has `data` (regardless of type name).
+    """Find the newest message with a clickable inline button.
     Searches up to 200 messages back.
     """
     try:
