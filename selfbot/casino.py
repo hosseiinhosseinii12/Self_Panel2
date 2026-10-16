@@ -5,7 +5,7 @@ Strategy (Martingale with 5M cap):
   - On loss: bet *= 3
   - On win: reset to 100,000
   - Cap: 5,000,000 (bot rejects anything above)
-  - Any computed bet above cap → rounded down to 5,000,000
+  - Any computed bet above cap -> rounded down to 5,000,000
 
 Ledger (per user):
   - total_invested: sum of all bets placed
@@ -16,6 +16,10 @@ Ledger (per user):
   - current_streak: consecutive wins
   - best_streak: longest consecutive wins
   - last_multiplier, last_score, last_result
+
+FIX: the animated 🎰 is now sent as a real Telegram Dice
+(InputMediaDice) instead of a custom-emoji text entity, so the game bot
+counts it (message.dice) and it is animated for every account.
 """
 import asyncio
 import random
@@ -33,20 +37,9 @@ from . import db
 try:
     from telethon import events, functions, types
     from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
-    from telethon.tl.types import (
-        ReplyInlineMarkup,
-        KeyboardButtonCallback,
-        KeyboardButtonUrl,
-        MessageEntityCustomEmoji,
-        MessageEntityTextUrl,
-    )
-    from telethon.extensions import html as tl_html
     HAS_TELETHON = True
 except ImportError:
     HAS_TELETHON = False
-    MessageEntityCustomEmoji = None
-    MessageEntityTextUrl = None
-    tl_html = None
 
 
 # ===========================================================================
@@ -73,150 +66,6 @@ START_BET = 100_000
 LOSS_MULTIPLIER = 3
 MAX_BET = 5_000_000
 MIN_BET = 1_000
-
-
-# ===========================================================================
-# Custom HTML Parser — supports <tg-emoji> and <a href="emoji/ID">
-# ===========================================================================
-if HAS_TELETHON:
-    class CustomHtml:
-        """HTML parse mode that understands custom emoji tags.
-
-        Supports two syntaxes:
-          - <tg-emoji emoji-id="123456">🎰</tg-emoji>
-          - <a href="emoji/123456">🎰</a>
-        """
-        @staticmethod
-        def parse(text):
-            text, entities = tl_html.parse(text)
-            for i, e in enumerate(entities):
-                if isinstance(e, MessageEntityTextUrl):
-                    url = e.url or ""
-                    if url.startswith("emoji/"):
-                        try:
-                            doc_id = int(url.split("/", 1)[1])
-                        except (ValueError, IndexError):
-                            continue
-                        entities[i] = MessageEntityCustomEmoji(
-                            offset=e.offset,
-                            length=e.length,
-                            document_id=doc_id,
-                        )
-            return text, entities
-
-        @staticmethod
-        def unparse(text, entities):
-            return tl_html.unparse(text, entities)
-else:
-    CustomHtml = None
-
-
-# ===========================================================================
-# Custom Emoji ID Cache
-# ===========================================================================
-_CUSTOM_EMOJI_CACHE: dict = {}      # user_id -> int document_id
-_PREMIUM_LOGGED: set = set()        # user_ids we already logged premium status for
-
-
-async def _log_account_status(client, user_id: int) -> None:
-    """Log whether the account is Premium (only once per user)."""
-    if int(user_id) in _PREMIUM_LOGGED:
-        return
-    try:
-        me = await client.get_me()
-        is_premium = bool(getattr(me, "premium", False))
-        log_bot.info(
-            f"casino: account uid={user_id} "
-            f"username=@{getattr(me, 'username', None)} "
-            f"premium={is_premium}"
-        )
-        if not is_premium:
-            log_bot.warning(
-                f"casino: ⚠️ uid={user_id} is NOT Telegram Premium. "
-                f"Animated custom emoji will be downgraded to plain unicode "
-                f"by the server. Upgrade is required to send animated 🎰."
-            )
-        _PREMIUM_LOGGED.add(int(user_id))
-    except Exception as e:
-        log_bot.warning(f"casino: could not read account status: {e}")
-
-
-async def find_wheel_custom_emoji_id(client, user_id: int) -> Optional[int]:
-    """Resolve the animated 🎰 custom emoji document_id via the Telegram API.
-
-    messages.SearchCustomEmoji returns an EmojiList whose `document_id` field
-    is a Vector<long> (a list). We must take the first element.
-    Result is cached per user_id.
-    """
-    cached = _CUSTOM_EMOJI_CACHE.get(int(user_id))
-    if cached:
-        return int(cached)
-
-    if not HAS_TELETHON:
-        return None
-
-    try:
-        me = await client.get_me()
-        access_hash = getattr(me, "access_hash", 0) or 0
-
-        # Try the modern signature first
-        try:
-            result = await client(functions.messages.SearchCustomEmojiRequest(
-                emoticon=EMOJI_TRIGGER,
-                hash=access_hash,
-            ))
-        except TypeError:
-            result = await client(functions.messages.SearchCustomEmojiRequest(
-                emoticon=EMOJI_TRIGGER,
-            ))
-
-        doc_id = None
-        if result is not None:
-            raw = getattr(result, "document_id", None)
-            # Vector<long> case — most common
-            if isinstance(raw, (list, tuple)):
-                if raw:
-                    doc_id = int(raw[0])
-            elif raw:
-                try:
-                    doc_id = int(raw)
-                except (TypeError, ValueError):
-                    doc_id = None
-
-            # Fallback: look in .documents (older response shapes)
-            if not doc_id:
-                docs = getattr(result, "documents", None) or []
-                for d in docs:
-                    did = getattr(d, "id", None)
-                    if did:
-                        doc_id = int(did)
-                        break
-
-        # Debug: dump what the API returned
-        try:
-            log_bot.info(
-                f"casino: searchCustomEmoji 🎰 raw result="
-                f"{result.stringify()[:300] if result else 'None'}"
-            )
-        except Exception:
-            pass
-
-        if doc_id:
-            _CUSTOM_EMOJI_CACHE[int(user_id)] = int(doc_id)
-            log_bot.info(
-                f"casino: resolved animated 🎰 doc_id={doc_id} "
-                f"for uid={user_id}"
-            )
-            return int(doc_id)
-
-        log_bot.warning(
-            f"casino: searchCustomEmoji returned no doc_id for 🎰 "
-            f"(account may lack access)"
-        )
-        return None
-    except Exception as e:
-        log_bot.warning(f"casino: searchCustomEmoji 🎰 failed: {e}")
-        return None
 
 
 # ===========================================================================
@@ -283,35 +132,6 @@ def _log_all_buttons(panel_msg, label: str = "") -> None:
         pass
 
 
-def _debug_entities(msg, label: str = "") -> None:
-    try:
-        if not msg:
-            return
-        text = msg.message or ""
-        log_bot.info(f"casino: [ent{label}] msg_id={msg.id} text={text[:200]!r}")
-        if not msg.entities:
-            log_bot.info(f"casino: [ent{label}] no entities")
-            return
-        for i, ent in enumerate(msg.entities):
-            etype = type(ent).__name__
-            offset = getattr(ent, "offset", None)
-            length = getattr(ent, "length", None)
-            doc_id = getattr(ent, "document_id", None)
-            emoji_char = ""
-            try:
-                if text and offset is not None and length is not None:
-                    emoji_char = text[offset:offset + length]
-            except Exception:
-                pass
-            log_bot.info(
-                f"casino: [ent{label}] ent[{i}] type={etype} "
-                f"offset={offset} length={length} "
-                f"document_id={doc_id} emoji={emoji_char!r}"
-            )
-    except Exception as e:
-        log_bot.warning(f"casino: debug entities failed: {e}")
-
-
 def _find_button_with_index(msg, patterns: list):
     if not msg or not msg.reply_markup:
         return None, None
@@ -332,52 +152,6 @@ def _find_button_with_index(msg, patterns: list):
                     return btn, flat
             flat += 1
     return None, None
-
-
-def _extract_custom_emoji_from_message(msg, prefer_emoji: str = EMOJI_TRIGGER) -> Optional[dict]:
-    """Extract a custom emoji entity from a message.
-
-    Prefers the entity whose visible slice equals `prefer_emoji`,
-    otherwise the one whose slice contains it, otherwise the first one.
-
-    Returns dict with: document_id, offset, length, raw.
-    """
-    try:
-        if not msg or not msg.entities:
-            return None
-        text = msg.message or ""
-        candidates = []
-        for ent in msg.entities:
-            if type(ent).__name__ != "MessageEntityCustomEmoji":
-                continue
-            doc_id = getattr(ent, "document_id", None)
-            if not doc_id:
-                continue
-            offset = getattr(ent, "offset", 0) or 0
-            length = getattr(ent, "length", 0) or 0
-            try:
-                slice_text = text[offset:offset + length] if length else ""
-            except Exception:
-                slice_text = ""
-            candidates.append({
-                "document_id": int(doc_id),
-                "offset": int(offset),
-                "length": int(length),
-                "raw": slice_text,
-            })
-        if not candidates:
-            return None
-
-        for c in candidates:
-            if c["raw"] == prefer_emoji:
-                return c
-        for c in candidates:
-            if prefer_emoji and prefer_emoji in (c["raw"] or ""):
-                return c
-        return candidates[0]
-    except Exception as e:
-        log_bot.warning(f"casino: extract custom emoji failed: {e}")
-        return None
 
 
 async def _click_button(client, chat_id: int, message_id: int,
@@ -442,87 +216,67 @@ async def _send_reply(client, chat_id: int, text: str, reply_to: int) -> None:
         log_bot.warning(f"casino: reply failed: {e}")
 
 
-async def _send_animated_emoji(client, chat_id: int, emoji_char: str,
-                                doc_id: int, reply_to: int) -> bool:
-    """Send an animated custom emoji as a reply.
+async def _send_dice(client, chat_id: int, reply_to: int,
+                     emoticon: str = EMOJI_TRIGGER) -> Optional[int]:
+    """Send a real Telegram dice (animated slot machine) as a reply.
 
-    Uses the CustomHtml parser first (most reliable across Telethon versions),
-    then falls back to explicitly constructing MessageEntityCustomEmoji.
+    This is the animated 🎰 that game bots read via `message.dice`.
+    The value (1..64 for 🎰) is decided by Telegram's servers.
+
+    Returns the dice value on success (0 if sent but value unknown),
+    or None on failure.
     """
-    if not emoji_char or not doc_id:
-        return False
+    if not HAS_TELETHON:
+        return None
 
-    # --- Attempt 1: HTML with <tg-emoji> tag ---
-    if HAS_TELETHON and CustomHtml is not None:
-        try:
-            prev_parse = getattr(client, "parse_mode", None)
-            client.parse_mode = CustomHtml()
-            html_text = (
-                f'<tg-emoji emoji-id="{int(doc_id)}">{emoji_char}</tg-emoji>'
-            )
-            await client.send_message(
-                chat_id, html_text, reply_to=reply_to,
-            )
-            log_bot.info(
-                f"casino: [emoji] OK via HTML tg-emoji doc_id={doc_id}"
-            )
-            client.parse_mode = prev_parse
-            return True
-        except Exception as e:
-            log_bot.warning(f"casino: [emoji] HTML tg-emoji failed: {e}")
-            try:
-                client.parse_mode = prev_parse  # restore
-            except Exception:
-                pass
+    sent = None
 
-    # --- Attempt 2: HTML with <a href="emoji/ID"> ---
-    if HAS_TELETHON and CustomHtml is not None:
-        try:
-            prev_parse = getattr(client, "parse_mode", None)
-            client.parse_mode = CustomHtml()
-            html_text = (
-                f'<a href="emoji/{int(doc_id)}">{emoji_char}</a>'
-            )
-            await client.send_message(
-                chat_id, html_text, reply_to=reply_to,
-            )
-            log_bot.info(
-                f"casino: [emoji] OK via HTML a-emoji doc_id={doc_id}"
-            )
-            client.parse_mode = prev_parse
-            return True
-        except Exception as e:
-            log_bot.warning(f"casino: [emoji] HTML a-emoji failed: {e}")
-            try:
-                client.parse_mode = prev_parse
-            except Exception:
-                pass
-
-    # --- Attempt 3: explicit MessageEntityCustomEmoji ---
-    if MessageEntityCustomEmoji is None:
-        return False
+    # Attempt 1: high-level send_file with InputMediaDice
     try:
-        length = len(emoji_char.encode("utf-16-le")) // 2
-        if length <= 0:
-            return False
-        entity = MessageEntityCustomEmoji(
-            offset=0,
-            length=length,
-            document_id=int(doc_id),
-        )
-        await client.send_message(
+        sent = await client.send_file(
             chat_id,
-            emoji_char,
-            formatting_entities=[entity],
+            types.InputMediaDice(emoticon),
             reply_to=reply_to,
         )
-        log_bot.info(
-            f"casino: [emoji] OK via entity doc_id={doc_id}"
-        )
-        return True
     except Exception as e:
-        log_bot.warning(f"casino: [emoji] entity failed: {e}")
-        return False
+        log_bot.warning(f"casino: [dice] send_file failed: {e}")
+
+    # Attempt 2: raw SendMediaRequest (old/new Telethon signatures)
+    if sent is None:
+        try:
+            peer = await client.get_input_entity(chat_id)
+            rid = random.getrandbits(63)
+            try:
+                await client(functions.messages.SendMediaRequest(
+                    peer=peer,
+                    media=types.InputMediaDice(emoticon=emoticon),
+                    message="",
+                    random_id=rid,
+                    reply_to=types.InputReplyToMessage(
+                        reply_to_msg_id=reply_to
+                    ),
+                ))
+            except (TypeError, AttributeError):
+                await client(functions.messages.SendMediaRequest(
+                    peer=peer,
+                    media=types.InputMediaDice(emoticon=emoticon),
+                    message="",
+                    random_id=rid,
+                    reply_to_msg_id=reply_to,
+                ))
+            log_bot.info("casino: [dice] OK via raw SendMediaRequest")
+            return 0  # sent, value unknown
+        except Exception as e:
+            log_bot.warning(f"casino: [dice] raw request failed: {e}")
+            return None
+
+    try:
+        media = getattr(sent, "media", None)
+        value = getattr(media, "value", None)
+        log_bot.info(f"casino: [dice] OK emoticon={emoticon} value={value}")
+        return int(value) if value is not None else 0
+    except Exception:
+        return 0
 
 
 # ===========================================================================
@@ -776,12 +530,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
     except Exception:
         pass
 
-    # Log account status once per user
-    try:
-        await _log_account_status(client, user_id)
-    except Exception:
-        pass
-
     st = _get_state(user_id)
     async with st.lock:
         st.chat_id = chat_id
@@ -901,82 +649,21 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await asyncio.sleep(2.5)
 
         # -------------------------------------------------------------------
-        # 8. Send animated 🎰 custom emoji
+        # 8. Send real animated 🎰 (Telegram dice) — this is what the game counts
         # -------------------------------------------------------------------
-        log_bot.info("casino: [8] sending animated 🎰 custom emoji")
+        log_bot.info("casino: [8] sending 🎰 dice")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        _debug_entities(panel_msg, "before-emoji-send")
 
-        sent = False
+        dice_value = await _send_dice(client, chat_id, panel_msg.id)
 
-        # Priority 1: official animated 🎰 via SearchCustomEmoji
-        doc_id = await find_wheel_custom_emoji_id(client, user_id)
-        if doc_id:
-            sent = await _send_animated_emoji(
-                client, chat_id, EMOJI_TRIGGER, doc_id, panel_msg.id,
-            )
-            if not sent:
-                # Clear cache to retry lookup next cycle
-                _CUSTOM_EMOJI_CACHE.pop(int(user_id), None)
+        if dice_value is None:
+            # one retry after a short pause
+            await asyncio.sleep(1.5)
+            dice_value = await _send_dice(client, chat_id, panel_msg.id)
 
-        # Priority 2: custom emoji entity present in the panel message
-        if not sent:
-            custom = _extract_custom_emoji_from_message(
-                panel_msg, prefer_emoji=EMOJI_TRIGGER,
-            )
-            if custom and custom.get("document_id"):
-                log_bot.info(
-                    f"casino: [8] trying panel-derived doc_id="
-                    f"{custom['document_id']} raw={custom.get('raw')!r}"
-                )
-                sent = await _send_animated_emoji(
-                    client, chat_id, EMOJI_TRIGGER,
-                    custom["document_id"], panel_msg.id,
-                )
-                if not sent and custom.get("raw") and custom["raw"] != EMOJI_TRIGGER:
-                    sent = await _send_animated_emoji(
-                        client, chat_id, custom["raw"],
-                        custom["document_id"], panel_msg.id,
-                    )
-
-        # Priority 3: scan recent messages for any custom 🎰 entity
-        if not sent:
-            log_bot.info("casino: [8] scanning recent msgs for custom 🎰")
-            try:
-                recent = await client.get_messages(chat_id, limit=15)
-                for m in recent:
-                    if not m or not m.entities:
-                        continue
-                    c2 = _extract_custom_emoji_from_message(
-                        m, prefer_emoji=EMOJI_TRIGGER,
-                    )
-                    if not c2 or not c2.get("document_id"):
-                        continue
-                    log_bot.info(
-                        f"casino: [8] found in msg_id={m.id} "
-                        f"doc_id={c2['document_id']} raw={c2.get('raw')!r}"
-                    )
-                    if await _send_animated_emoji(
-                        client, chat_id, EMOJI_TRIGGER,
-                        c2["document_id"], panel_msg.id,
-                    ):
-                        sent = True
-                        break
-                    if c2.get("raw") and c2["raw"] != EMOJI_TRIGGER:
-                        if await _send_animated_emoji(
-                            client, chat_id, c2["raw"],
-                            c2["document_id"], panel_msg.id,
-                        ):
-                            sent = True
-                            break
-            except Exception as e:
-                log_bot.warning(f"casino: [8] scan failed: {e}")
-
-        # Final fallback: plain unicode emoji
-        if not sent:
+        if dice_value is None:
             log_bot.warning(
-                "casino: [8] all custom emoji attempts failed, "
-                "falling back to plain unicode 🎰"
+                "casino: [8] dice failed twice, falling back to plain 🎰"
             )
             await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
