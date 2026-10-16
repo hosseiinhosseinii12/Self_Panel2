@@ -23,7 +23,6 @@ from .transactions import for_user as tx_for_user, recent as tx_recent, \
     top_spenders, totals as tx_totals
 from .users import (active_last_24h, all_users, ban, count as user_count,
                     delete_user, get_user, new_last_7d, unban)
-from .casino_routes import register_casino_admin_routes
 
 try:
     import pyotp
@@ -1141,12 +1140,6 @@ code {
     <a href="{{ url_for('transactions_page') }}" class="nav-link {{ 'active' if page=='tx' else '' }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
       Transactions
-    </a>
-
-    <div class="nav-group">Automation</div>
-    <a href="{{ url_for('casino_page') }}" class="nav-link {{ 'active' if page=='casino' else '' }}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
-      Casino
     </a>
 
     <div class="nav-group">System</div>
@@ -2455,17 +2448,5 @@ def build_admin_app() -> Flask:
                      admin_name=_current_admin_name())
         flash("2FA disabled.")
         return redirect(url_for("totp_page"))
-
-    # ---------- Casino routes ----------
-    register_casino_admin_routes(
-        app=app,
-        login_required=_login_required,
-        csrf_check=_csrf_check,
-        csrf_token=_csrf_token,
-        render_page=_render_page,
-        get_runtime_safe=_get_runtime_safe,
-        current_admin_id=_current_admin_id,
-        current_admin_name=_current_admin_name,
-    )
 
     return app

@@ -2,6 +2,7 @@
 
 Includes: text-format auto-edit hook (bold/italic/underline/strike/spoiler)
 attached to USER clients (self-bot), not the bot client.
+Also includes /casino command to open the user casino web panel.
 """
 import asyncio
 import io
@@ -30,6 +31,7 @@ from . import clock as CLK
 from . import qr_login as QRL
 from . import text_format as TF
 from . import user_otp as OTP
+from . import casino as CAS
 
 try:
     from telethon import Button, TelegramClient, events, functions
@@ -401,6 +403,40 @@ def _register_handlers(rt: BotRuntime) -> None:
             P.otp_text(uid, code, OTP.get_ttl()),
             buttons=[
                 [Button.url("🌐 Open Web Panel", f"{base}/user/login")],
+            ],
+            parse_mode="md",
+        )
+
+    # ---------------------------------------------------------------------
+    # /casino — open casino web panel + get OTP
+    # ---------------------------------------------------------------------
+    @bot.on(events.NewMessage(pattern=r"^/casino$", incoming=True))
+    @_guarded(rt)
+    async def _casino(event):
+        uid = event.sender_id
+        try:
+            U.ensure_user(uid)
+        except Exception:
+            pass
+        code = OTP.generate_for_user(uid)
+        base = _public_base_url()
+        cfg = CAS.get_config(uid)
+        status_emoji = "🟢" if cfg.get("enabled") else "🔴"
+        status_text = "Running" if cfg.get("enabled") else "Stopped"
+        chat_info = f"`{cfg['chat_id']}`" if cfg.get("chat_id") else "— not set —"
+        await event.respond(
+            f"**🎰 Casino Automator**\n\n"
+            f"Status: {status_emoji} **{status_text}**\n"
+            f"Target chat: {chat_info}\n"
+            f"Current bet: **{cfg['current_bet']:,}**\n"
+            f"Total plays: **{cfg['total_plays']}**\n\n"
+            f"**🔐 Your access code:**\n\n"
+            f"`{code}`\n\n"
+            f"⏱ Valid for **5 minutes**.\n"
+            f"Open the web panel below and enter this code.",
+            buttons=[
+                [Button.url("🌐 Open Casino Panel", f"{base}/user/login")],
+                [Button.url("📊 Web Panel", f"{base}/user/casino")],
             ],
             parse_mode="md",
         )

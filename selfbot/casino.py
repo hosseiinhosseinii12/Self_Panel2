@@ -18,6 +18,7 @@ All bot messages from Meowie Casino arrive on the SAME message and get
 edited in-place. We track them via a per-run state machine.
 """
 import asyncio
+import random
 import re
 import secrets
 import time
@@ -53,10 +54,12 @@ WHEEL_BUTTON_PATTERNS = [
 SET_ENTRANCE_PATTERNS = [
     r"set\s*entrance\s*fee",
     r"ꜱᴇᴛ\s*ᴇɴᴛʀᴀɴᴄᴇ",
+    r"entrance\s*fee",
 ]
 SET_PLAYERS_PATTERNS = [
     r"set\s*number\s*of\s*players",
     r"ꜱᴇᴛ\s*ɴᴜᴍʙᴇʀ",
+    r"number\s*of\s*players",
 ]
 CREATE_TABLE_PATTERNS = [
     r"create\s*gambling\s*table",
@@ -66,7 +69,7 @@ EMOJI_TRIGGER = "🎰"
 
 DEFAULT_INTERVAL = 301  # 5 min 1 sec
 BOT_WAIT_TIMEOUT = 30.0
-GAME_TIMEOUT = 90.0
+GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 0.4
 
 
@@ -127,7 +130,9 @@ def _match_any(text: str, patterns: list) -> bool:
 
 
 def _find_button(msg, patterns: list):
-    """Find the first inline button whose text matches any pattern."""
+    """Find the first inline button whose text matches any pattern.
+    Also handles buttons whose text is emoji-only.
+    """
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -137,8 +142,14 @@ def _find_button(msg, patterns: list):
         for btn in row.buttons:
             if not isinstance(btn, KeyboardButtonCallback):
                 continue
-            if _match_any(_button_text(btn), patterns):
+            text = _button_text(btn)
+            if _match_any(text, patterns):
                 return btn
+            # also match emoji-only patterns
+            for p in patterns:
+                if len(p) <= 2 and p and ord(p[0]) > 0x2000:
+                    if p in text:
+                        return btn
     return None
 
 
@@ -157,6 +168,45 @@ def _find_button_by_text(msg, exact_texts: list):
             if _button_text(btn) in wanted:
                 return btn
     return None
+
+
+def _find_button_by_position(msg, row: int = 0, col: int = 0):
+    """Find an inline button by row/column position (0-indexed)."""
+    if not msg or not msg.reply_markup:
+        return None
+    rm = msg.reply_markup
+    if not isinstance(rm, ReplyInlineMarkup):
+        return None
+    rows = rm.rows
+    if row >= len(rows):
+        return None
+    buttons = rows[row].buttons
+    if col >= len(buttons):
+        return None
+    btn = buttons[col]
+    if not isinstance(btn, KeyboardButtonCallback):
+        return None
+    return btn
+
+
+def _log_all_buttons(panel_msg) -> None:
+    """Debug: log every inline button in the panel message."""
+    try:
+        if not panel_msg or not panel_msg.reply_markup:
+            log_bot.info("casino: no reply_markup on panel message")
+            return
+        for i, row in enumerate(panel_msg.reply_markup.rows):
+            for j, b in enumerate(row.buttons):
+                text = getattr(b, "text", "?")
+                data = getattr(b, "data", b"")
+                tname = type(b).__name__
+                log_bot.info(
+                    f"casino: panel button [{i}][{j}] "
+                    f"text={text!r} type={tname} "
+                    f"data_len={len(data) if data else 0}"
+                )
+    except Exception as e:
+        log_bot.warning(f"casino: log buttons failed: {e}")
 
 
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
@@ -273,14 +323,11 @@ def _next_bet(cfg: dict, result: str, multiplier: float) -> int:
     mults = _parse_multipliers(cfg)
 
     if result == "lose":
-        # multiply by 3 (or the largest multiplier)
         factor = max(mults) if mults else 3.0
         nxt = int(current * factor)
     elif result == "win":
-        # reset to initial
         nxt = initial
     elif result == "push":
-        # keep the same
         nxt = current
     else:
         nxt = current
@@ -409,7 +456,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
         st.emoji = ""
         st.panel_msg_id = None
 
-    # create run record
     db.add_casino_run({
         "id": st.run_id,
         "user_id": user_id,
@@ -422,10 +468,7 @@ async def _run_cycle(runtime, user_id: int) -> None:
                       f"run started bet={_format_amount(bet)}")
 
     try:
-        # register a temporary handler for messages in this chat
         result = await _play_round(runtime, client, user_id, chat_id, bet, st)
-
-        # apply result
         await _finalize_run(user_id, chat_id, bet, result)
     except asyncio.TimeoutError:
         db.add_casino_log(user_id, chat_id, "error", "game timeout")
@@ -444,7 +487,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
     # ---------- 1. Send "Casino" ----------
     await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
     log_bot.info(f"casino: sent '{CASINO_TRIGGER_TEXT}' uid={user_id}")
-    await asyncio.sleep(2.5)
+    await asyncio.sleep(3.0)
 
     # ---------- 2. Find the panel message ----------
     panel_msg = await _find_latest_panel(client, chat_id)
@@ -453,21 +496,35 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
     st.panel_msg_id = panel_msg.id
     log_bot.info(f"casino: panel msg id={panel_msg.id}")
 
+    # DEBUG: log all buttons
+    _log_all_buttons(panel_msg)
+
     # ---------- 3. Click "WHEEL OF FORTUNE" ----------
     btn = _find_button(panel_msg, WHEEL_BUTTON_PATTERNS)
     if btn is None:
-        # try opening the casino panel via "/start Casino" style
+        log_bot.info("casino: wheel not found by text, trying position [0][0]")
+        btn = _find_button_by_position(panel_msg, row=0, col=0)
+    if btn is None:
         raise TimeoutError("wheel of fortune button not found")
+    log_bot.info(
+        f"casino: clicking wheel button "
+        f"(data_len={len(btn.data) if btn.data else 0})"
+    )
     await _click_button(client, chat_id, panel_msg.id, btn)
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(2.5)
 
     # ---------- 4. Click "SET ENTRANCE FEE" ----------
     panel_msg = await _get_message(client, chat_id, panel_msg.id)
+    _log_all_buttons(panel_msg)
     btn = _find_button(panel_msg, SET_ENTRANCE_PATTERNS)
     if btn is None:
-        raise TimeoutError("set entrance fee button not found")
-    await _click_button(client, chat_id, panel_msg.id, btn)
-    await asyncio.sleep(1.5)
+        log_bot.info("casino: set-entrance not found by text, trying position [0][0]")
+        btn = _find_button_by_position(panel_msg, row=0, col=0)
+    if btn is not None:
+        await _click_button(client, chat_id, panel_msg.id, btn)
+        await asyncio.sleep(1.5)
+    else:
+        log_bot.warning("casino: set-entrance-fee button not found")
 
     # ---------- 5. Reply with bet amount ----------
     panel_msg = await _get_message(client, chat_id, panel_msg.id)
@@ -481,20 +538,32 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
     # ---------- 6. Click "SET NUMBER OF PLAYERS" ----------
     panel_msg = await _get_message(client, chat_id, panel_msg.id)
+    _log_all_buttons(panel_msg)
     btn = _find_button(panel_msg, SET_PLAYERS_PATTERNS)
+    if btn is None:
+        log_bot.info("casino: set-players not found by text, trying position [0][1]")
+        btn = _find_button_by_position(panel_msg, row=0, col=1)
     if btn is not None:
         await _click_button(client, chat_id, panel_msg.id, btn)
         await asyncio.sleep(1.5)
+
         # click "1"
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        btn = _find_button_by_text(panel_msg, ["1", "1️⃣"])
+        _log_all_buttons(panel_msg)
+        btn = _find_button_by_text(panel_msg, ["1", "1️⃣", "₁"])
+        if btn is None:
+            btn = _find_button_by_position(panel_msg, row=0, col=0)
         if btn is not None:
             await _click_button(client, chat_id, panel_msg.id, btn)
             await asyncio.sleep(1.5)
 
     # ---------- 7. Click "CREATE GAMBLING TABLE" ----------
     panel_msg = await _get_message(client, chat_id, panel_msg.id)
+    _log_all_buttons(panel_msg)
     btn = _find_button(panel_msg, CREATE_TABLE_PATTERNS)
+    if btn is None:
+        log_bot.info("casino: create-table not found by text, trying position [0][0]")
+        btn = _find_button_by_position(panel_msg, row=0, col=0)
     if btn is not None:
         await _click_button(client, chat_id, panel_msg.id, btn)
         await asyncio.sleep(2.0)
@@ -548,7 +617,6 @@ async def _poll_result(client, chat_id: int, msg_id: int,
             continue
         last_text = text
 
-        # detect result markers
         result = _parse_result(text)
         if result is not None:
             st.result = result["result"]
@@ -567,22 +635,18 @@ def _parse_result(text: str) -> Optional[dict]:
         return None
     low = text.lower()
 
-    # SCORE : 18 | 🍇 BAR 🍇
     m = re.search(r"score\s*[:：]\s*(\d+)\s*\|\s*(.+)", low)
     if not m:
         return None
     score = int(m.group(1))
     tail = m.group(2).strip()
 
-    # extract first emoji
     emoji = ""
     for ch in tail:
         if ord(ch) > 0x2000:
             emoji = ch
             break
 
-    # determine result type
-    # Bar / Cherry / etc. — common casino symbols:
     win_symbols = ["🍇", "🍒", "bar", "💎", "🎰", "7️⃣", "7"]
     lose_symbols = ["0", "❌", "💀", "empty", "no win", "lose"]
 
@@ -600,10 +664,7 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
     st = _get_state(user_id)
     mults = _parse_multipliers(cfg)
 
-    # decide multiplier based on result
     if result == "win":
-        # pick a random multiplier from the list
-        import random
         mult = random.choice(mults) if mults else 2.0
     elif result == "push":
         mult = 1.0
@@ -619,7 +680,6 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
 
     next_bet = _next_bet(cfg, result, mult)
 
-    # update run
     db.update_casino_run(
         st.run_id,
         multiplier=float(mult),
@@ -631,7 +691,6 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
         finished_at=_now_iso(),
     )
 
-    # update config counters
     total_plays = cfg["total_plays"] + 1
     total_wins = cfg["total_wins"] + (1 if result == "win" else 0)
     total_losses = cfg["total_losses"] + (1 if result == "lose" else 0)
@@ -692,7 +751,6 @@ async def trigger_now(runtime, user_id: int) -> dict:
     if client is None:
         return {"ok": False, "error": "user client not connected"}
 
-    # clear next_run so the loop runs immediately
     save_config(user_id, next_run="")
 
     try:
