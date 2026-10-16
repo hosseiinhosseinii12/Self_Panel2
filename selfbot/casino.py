@@ -22,6 +22,7 @@ import random
 import re
 import secrets
 import time
+import traceback
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
@@ -192,16 +193,21 @@ def _find_button_by_position(msg, row: int = 0, col: int = 0):
 def _log_all_buttons(panel_msg) -> None:
     """Debug: log every inline button in the panel message."""
     try:
-        if not panel_msg or not panel_msg.reply_markup:
-            log_bot.info("casino: no reply_markup on panel message")
+        if not panel_msg:
+            log_bot.info("casino: [debug] panel_msg is None")
             return
+        if not panel_msg.reply_markup:
+            log_bot.info("casino: [debug] panel_msg has no reply_markup")
+            return
+        log_bot.info(f"casino: [debug] panel msg id={panel_msg.id}")
+        log_bot.info(f"casino: [debug] markup type={type(panel_msg.reply_markup).__name__}")
         for i, row in enumerate(panel_msg.reply_markup.rows):
             for j, b in enumerate(row.buttons):
                 text = getattr(b, "text", "?")
                 data = getattr(b, "data", b"")
                 tname = type(b).__name__
                 log_bot.info(
-                    f"casino: panel button [{i}][{j}] "
+                    f"casino: [debug] button [{i}][{j}] "
                     f"text={text!r} type={tname} "
                     f"data_len={len(data) if data else 0}"
                 )
@@ -212,20 +218,33 @@ def _log_all_buttons(panel_msg) -> None:
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
     """Click an inline callback button."""
     if btn is None:
+        log_bot.warning("casino: click called with None button")
         return False
     try:
         data = btn.data
-        await client(GetBotCallbackAnswerRequest(
+        if not data:
+            log_bot.warning("casino: button has no data, cannot click")
+            return False
+        log_bot.info(
+            f"casino: [click] sending GetBotCallbackAnswer "
+            f"peer={chat_id} msg={message_id} "
+            f"text={btn.text!r} data_len={len(data)}"
+        )
+        result = await client(GetBotCallbackAnswerRequest(
             peer=chat_id,
             msg_id=message_id,
             data=data,
         ))
         log_bot.info(
-            f"casino: clicked button '{btn.text}' on msg {message_id}"
+            f"casino: [click] OK text={btn.text!r} "
+            f"response={getattr(result, 'message', '')!r}"
         )
         return True
     except Exception as e:
-        log_bot.warning(f"casino: click failed: {type(e).__name__}: {e}")
+        log_bot.warning(
+            f"casino: [click] FAILED text={getattr(btn, 'text', '?')!r} "
+            f"{type(e).__name__}: {e}"
+        )
         return False
 
 
@@ -470,125 +489,161 @@ async def _run_cycle(runtime, user_id: int) -> None:
     try:
         result = await _play_round(runtime, client, user_id, chat_id, bet, st)
         await _finalize_run(user_id, chat_id, bet, result)
-    except asyncio.TimeoutError:
-        db.add_casino_log(user_id, chat_id, "error", "game timeout")
+    except asyncio.TimeoutError as e:
+        db.add_casino_log(user_id, chat_id, "error", f"timeout: {e}")
         db.update_casino_run(st.run_id, status="timeout",
-                              finished_at=_now_iso())
+                              error=str(e), finished_at=_now_iso())
     except Exception as e:
+        tb = traceback.format_exc()
         db.add_casino_log(user_id, chat_id, "error", f"play failed: {e}")
-        db.update_casino_run(st.run_id, status="error", error=str(e),
+        db.update_casino_run(st.run_id, status="error",
+                              error=f"{type(e).__name__}: {e}",
                               finished_at=_now_iso())
+        log_bot.error(f"casino: cycle exception:\n{tb}")
 
 
 async def _play_round(runtime, client, user_id: int, chat_id: int,
                        bet: int, st: CasinoState) -> str:
     """Run one full game cycle. Returns 'win' | 'lose' | 'push' | 'timeout'."""
+    try:
+        # ---------- 1. Send "Casino" ----------
+        log_bot.info(f"casino: [1] sending '{CASINO_TRIGGER_TEXT}' uid={user_id}")
+        await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        log_bot.info("casino: [1] sent OK")
+        await asyncio.sleep(4.0)
 
-    # ---------- 1. Send "Casino" ----------
-    await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
-    log_bot.info(f"casino: sent '{CASINO_TRIGGER_TEXT}' uid={user_id}")
-    await asyncio.sleep(3.0)
+        # ---------- 2. Find the panel message ----------
+        log_bot.info("casino: [2] finding panel message")
+        panel_msg = await _find_latest_panel(client, chat_id)
+        if panel_msg is None:
+            log_bot.error("casino: [2] FAILED - panel not found")
+            raise TimeoutError("casino panel not found after trigger")
+        st.panel_msg_id = panel_msg.id
+        log_bot.info(f"casino: [2] panel msg id={panel_msg.id}")
 
-    # ---------- 2. Find the panel message ----------
-    panel_msg = await _find_latest_panel(client, chat_id)
-    if panel_msg is None:
-        raise TimeoutError("casino panel not found after trigger")
-    st.panel_msg_id = panel_msg.id
-    log_bot.info(f"casino: panel msg id={panel_msg.id}")
+        # DEBUG: log all buttons
+        _log_all_buttons(panel_msg)
 
-    # DEBUG: log all buttons
-    _log_all_buttons(panel_msg)
+        # ---------- 3. Click "WHEEL OF FORTUNE" ----------
+        log_bot.info("casino: [3] looking for wheel button")
+        btn = _find_button(panel_msg, WHEEL_BUTTON_PATTERNS)
+        if btn is None:
+            log_bot.info("casino: [3] wheel not found by text, trying position [0][0]")
+            btn = _find_button_by_position(panel_msg, row=0, col=0)
+        if btn is None:
+            log_bot.error("casino: [3] FAILED - wheel button not found")
+            raise TimeoutError("wheel of fortune button not found")
+        log_bot.info(
+            f"casino: [3] clicking wheel button "
+            f"(text={getattr(btn, 'text', '?')!r} "
+            f"data_len={len(btn.data) if btn.data else 0})"
+        )
+        ok = await _click_button(client, chat_id, panel_msg.id, btn)
+        log_bot.info(f"casino: [3] click returned {ok}")
+        await asyncio.sleep(3.0)
 
-    # ---------- 3. Click "WHEEL OF FORTUNE" ----------
-    btn = _find_button(panel_msg, WHEEL_BUTTON_PATTERNS)
-    if btn is None:
-        log_bot.info("casino: wheel not found by text, trying position [0][0]")
-        btn = _find_button_by_position(panel_msg, row=0, col=0)
-    if btn is None:
-        raise TimeoutError("wheel of fortune button not found")
-    log_bot.info(
-        f"casino: clicking wheel button "
-        f"(data_len={len(btn.data) if btn.data else 0})"
-    )
-    await _click_button(client, chat_id, panel_msg.id, btn)
-    await asyncio.sleep(2.5)
-
-    # ---------- 4. Click "SET ENTRANCE FEE" ----------
-    panel_msg = await _get_message(client, chat_id, panel_msg.id)
-    _log_all_buttons(panel_msg)
-    btn = _find_button(panel_msg, SET_ENTRANCE_PATTERNS)
-    if btn is None:
-        log_bot.info("casino: set-entrance not found by text, trying position [0][0]")
-        btn = _find_button_by_position(panel_msg, row=0, col=0)
-    if btn is not None:
-        await _click_button(client, chat_id, panel_msg.id, btn)
-        await asyncio.sleep(1.5)
-    else:
-        log_bot.warning("casino: set-entrance-fee button not found")
-
-    # ---------- 5. Reply with bet amount ----------
-    panel_msg = await _get_message(client, chat_id, panel_msg.id)
-    await client.send_message(
-        chat_id,
-        _format_amount(bet),
-        reply_to=panel_msg.id,
-    )
-    log_bot.info(f"casino: replied with bet {_format_amount(bet)}")
-    await asyncio.sleep(2.5)
-
-    # ---------- 6. Click "SET NUMBER OF PLAYERS" ----------
-    panel_msg = await _get_message(client, chat_id, panel_msg.id)
-    _log_all_buttons(panel_msg)
-    btn = _find_button(panel_msg, SET_PLAYERS_PATTERNS)
-    if btn is None:
-        log_bot.info("casino: set-players not found by text, trying position [0][1]")
-        btn = _find_button_by_position(panel_msg, row=0, col=1)
-    if btn is not None:
-        await _click_button(client, chat_id, panel_msg.id, btn)
-        await asyncio.sleep(1.5)
-
-        # click "1"
+        # ---------- 4. Click "SET ENTRANCE FEE" ----------
+        log_bot.info("casino: [4] looking for set-entrance button")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg)
-        btn = _find_button_by_text(panel_msg, ["1", "1️⃣", "₁"])
+        btn = _find_button(panel_msg, SET_ENTRANCE_PATTERNS)
         if btn is None:
+            log_bot.info("casino: [4] not found by text, trying position [0][0]")
             btn = _find_button_by_position(panel_msg, row=0, col=0)
         if btn is not None:
+            log_bot.info(f"casino: [4] clicking set-entrance "
+                         f"(text={getattr(btn, 'text', '?')!r})")
             await _click_button(client, chat_id, panel_msg.id, btn)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.0)
+        else:
+            log_bot.warning("casino: [4] set-entrance-fee button not found, skipping")
 
-    # ---------- 7. Click "CREATE GAMBLING TABLE" ----------
-    panel_msg = await _get_message(client, chat_id, panel_msg.id)
-    _log_all_buttons(panel_msg)
-    btn = _find_button(panel_msg, CREATE_TABLE_PATTERNS)
-    if btn is None:
-        log_bot.info("casino: create-table not found by text, trying position [0][0]")
-        btn = _find_button_by_position(panel_msg, row=0, col=0)
-    if btn is not None:
-        await _click_button(client, chat_id, panel_msg.id, btn)
-        await asyncio.sleep(2.0)
+        # ---------- 5. Reply with bet amount ----------
+        log_bot.info(f"casino: [5] replying with bet {_format_amount(bet)}")
+        panel_msg = await _get_message(client, chat_id, panel_msg.id)
+        await client.send_message(
+            chat_id,
+            _format_amount(bet),
+            reply_to=panel_msg.id,
+        )
+        log_bot.info("casino: [5] reply sent")
+        await asyncio.sleep(3.0)
 
-    # ---------- 8. Reply with 🎰 emoji ----------
-    panel_msg = await _get_message(client, chat_id, panel_msg.id)
-    await client.send_message(
-        chat_id,
-        EMOJI_TRIGGER,
-        reply_to=panel_msg.id,
-    )
-    log_bot.info(f"casino: sent {EMOJI_TRIGGER} emoji")
-    st.timer_msg_id = panel_msg.id
+        # ---------- 6. Click "SET NUMBER OF PLAYERS" ----------
+        log_bot.info("casino: [6] looking for set-players button")
+        panel_msg = await _get_message(client, chat_id, panel_msg.id)
+        _log_all_buttons(panel_msg)
+        btn = _find_button(panel_msg, SET_PLAYERS_PATTERNS)
+        if btn is None:
+            log_bot.info("casino: [6] not found by text, trying position [0][1]")
+            btn = _find_button_by_position(panel_msg, row=0, col=1)
+        if btn is not None:
+            log_bot.info("casino: [6] clicking set-players")
+            await _click_button(client, chat_id, panel_msg.id, btn)
+            await asyncio.sleep(2.0)
 
-    # ---------- 9. Poll for result on the same message ----------
-    return await _poll_result(client, chat_id, panel_msg.id, st)
+            # click "1"
+            log_bot.info("casino: [6b] looking for '1' button")
+            panel_msg = await _get_message(client, chat_id, panel_msg.id)
+            _log_all_buttons(panel_msg)
+            btn = _find_button_by_text(panel_msg, ["1", "1️⃣", "₁"])
+            if btn is None:
+                log_bot.info("casino: [6b] not found by text, trying position [0][0]")
+                btn = _find_button_by_position(panel_msg, row=0, col=0)
+            if btn is not None:
+                log_bot.info("casino: [6b] clicking '1'")
+                await _click_button(client, chat_id, panel_msg.id, btn)
+                await asyncio.sleep(2.0)
+
+        # ---------- 7. Click "CREATE GAMBLING TABLE" ----------
+        log_bot.info("casino: [7] looking for create-table button")
+        panel_msg = await _get_message(client, chat_id, panel_msg.id)
+        _log_all_buttons(panel_msg)
+        btn = _find_button(panel_msg, CREATE_TABLE_PATTERNS)
+        if btn is None:
+            log_bot.info("casino: [7] not found by text, trying position [0][0]")
+            btn = _find_button_by_position(panel_msg, row=0, col=0)
+        if btn is not None:
+            log_bot.info("casino: [7] clicking create-table")
+            await _click_button(client, chat_id, panel_msg.id, btn)
+            await asyncio.sleep(2.5)
+
+        # ---------- 8. Reply with 🎰 emoji ----------
+        log_bot.info(f"casino: [8] sending emoji {EMOJI_TRIGGER}")
+        panel_msg = await _get_message(client, chat_id, panel_msg.id)
+        await client.send_message(
+            chat_id,
+            EMOJI_TRIGGER,
+            reply_to=panel_msg.id,
+        )
+        log_bot.info("casino: [8] emoji sent")
+        st.timer_msg_id = panel_msg.id
+
+        # ---------- 9. Poll for result ----------
+        log_bot.info("casino: [9] polling for result")
+        return await _poll_result(client, chat_id, panel_msg.id, st)
+
+    except Exception as e:
+        log_bot.error(
+            f"casino: play_round FAILED: {type(e).__name__}: {e}\n"
+            f"{traceback.format_exc()}"
+        )
+        raise
 
 
 async def _find_latest_panel(client, chat_id: int):
-    """Get the latest message from the bot in this chat."""
+    """Get the latest message from the bot that has an inline keyboard."""
     try:
-        msgs = await client.get_messages(chat_id, limit=5)
+        msgs = await client.get_messages(chat_id, limit=15)
         for m in msgs:
-            if m.reply_markup:
-                return m
+            # must have inline keyboard
+            if m.reply_markup and hasattr(m.reply_markup, "rows"):
+                # must contain at least one callback button
+                for row in m.reply_markup.rows:
+                    for b in row.buttons:
+                        if type(b).__name__ == "KeyboardButtonCallback":
+                            return m
+        log_bot.warning("casino: no panel message with callback buttons found")
     except Exception as e:
         log_bot.warning(f"casino: find panel failed: {e}")
     return None
