@@ -1,13 +1,7 @@
-"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
+"""Self-bot casino automator — DEBUG VERSION.
 
-Uses reply_to_msg_id to find the panel message: when we send "Casino",
-the bot replies to our message with the panel.
-
-Button positions (from the panel):
-  [0][0] = MEOWIE GAMBLE (first)
-  [0][1] = WHEEL OF FORTUNE (second — what we want)
-  [0][2] = DICE (third)
-  [1][0] = DIAMOND MINE (fourth)
+Dumps every detail of the panel's reply_markup so we can identify the
+correct Wheel of Fortune button. Only clicks once, then stops.
 """
 import asyncio
 import random
@@ -29,6 +23,8 @@ try:
         ReplyInlineMarkup,
         KeyboardButtonCallback,
         KeyboardButtonUrl,
+        KeyboardButton,
+        KeyboardButtonRow,
     )
     HAS_TELETHON = True
 except ImportError:
@@ -39,43 +35,18 @@ except ImportError:
 # Constants
 # ===========================================================================
 CASINO_TRIGGER_TEXT = "Casino"
-WHEEL_BUTTON_PATTERNS = [
-    r"wheel\s*of\s*fortune",
-    r"ᴡʜᴇᴇʟ\s*ᴏꜰ\s*ꜰᴏʀᴛᴜɴᴇ",
-    r"🎰",
-]
-SET_ENTRANCE_PATTERNS = [
-    r"set\s*entrance\s*fee",
-    r"ꜱᴇᴛ\s*ᴇɴᴛʀᴀɴᴄᴇ",
-    r"entrance\s*fee",
-]
-SET_PLAYERS_PATTERNS = [
-    r"set\s*number\s*of\s*players",
-    r"ꜱᴇᴛ\s*ɴᴜᴍʙᴇʀ",
-    r"number\s*of\s*players",
-]
-CREATE_TABLE_PATTERNS = [
-    r"create\s*gambling\s*table",
-    r"ᴄʀᴇᴀᴛᴇ\s*ɢᴀᴍʙʟɪɴɢ",
-]
 EMOJI_TRIGGER = "🎰"
 
 DEFAULT_INTERVAL = 301
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 0.4
 
-# Inline button types we accept as "clickable"
 _INLINE_TYPES = (
     "KeyboardButtonCallback",
     "KeyboardInlineButton",
     "KeyboardButtonUrl",
     "KeyboardButtonSwitchInline",
 )
-
-# Position of WHEEL OF FORTUNE button in the main casino panel
-# From the panel image: [0][0]=Meowie Gamble, [0][1]=Wheel, [0][2]=Dice, [1][0]=Diamond
-WHEEL_BUTTON_ROW = 0
-WHEEL_BUTTON_COL = 1
 
 
 # ===========================================================================
@@ -99,22 +70,7 @@ def _format_amount(n: int) -> str:
     return str(n)
 
 
-def _button_text(btn) -> str:
-    if btn is None:
-        return ""
-    return (getattr(btn, "text", "") or "").strip().lower()
-
-
-def _match_any(text: str, patterns: list) -> bool:
-    low = (text or "").lower()
-    for p in patterns:
-        if re.search(p, low, re.IGNORECASE):
-            return True
-    return False
-
-
 def _msg_has_clickable(msg) -> bool:
-    """Check if a message has at least one inline button."""
     if not msg or not msg.reply_markup:
         return False
     if not hasattr(msg.reply_markup, "rows"):
@@ -126,89 +82,60 @@ def _msg_has_clickable(msg) -> bool:
     return False
 
 
-def _find_button(msg, patterns: list):
-    """Find the first inline button whose text matches any pattern."""
-    if not msg or not msg.reply_markup:
-        return None
-    rm = msg.reply_markup
-    if not hasattr(rm, "rows"):
-        return None
-    for row in rm.rows:
-        for btn in row.buttons:
-            if type(btn).__name__ not in _INLINE_TYPES:
-                continue
-            text = _button_text(btn)
-            if _match_any(text, patterns):
-                return btn
-            for p in patterns:
-                if len(p) <= 2 and p and ord(p[0]) > 0x2000:
-                    if p in text:
-                        return btn
-    return None
-
-
-def _find_button_by_text(msg, exact_texts: list):
-    """Find inline button whose text equals one of exact_texts."""
-    if not msg or not msg.reply_markup:
-        return None
-    rm = msg.reply_markup
-    if not hasattr(rm, "rows"):
-        return None
-    wanted = {t.strip().lower() for t in exact_texts}
-    for row in rm.rows:
-        for btn in row.buttons:
-            if type(btn).__name__ not in _INLINE_TYPES:
-                continue
-            if _button_text(btn) in wanted:
-                return btn
-    return None
-
-
-def _find_button_by_position(msg, row: int = 0, col: int = 0):
-    """Find an inline button by row/column position (0-indexed)."""
-    if not msg or not msg.reply_markup:
-        return None
-    rm = msg.reply_markup
-    if not hasattr(rm, "rows"):
-        return None
-    rows = rm.rows
-    if row >= len(rows):
-        return None
-    buttons = rows[row].buttons
-    if col >= len(buttons):
-        return None
-    btn = buttons[col]
-    if type(btn).__name__ not in _INLINE_TYPES:
-        return None
-    return btn
-
-
-def _log_all_buttons(panel_msg) -> None:
+def _dump_raw_markup(panel_msg, label: str = "") -> None:
+    """Log every detail of the panel's reply_markup."""
     try:
         if not panel_msg:
-            log_bot.info("casino: [debug] panel_msg is None")
+            log_bot.info(f"casino: [raw{label}] panel_msg is None")
             return
         if not panel_msg.reply_markup:
-            log_bot.info("casino: [debug] panel_msg has no reply_markup")
+            log_bot.info(f"casino: [raw{label}] no reply_markup")
             return
-        log_bot.info(f"casino: [debug] panel msg id={panel_msg.id}")
-        log_bot.info(f"casino: [debug] markup type={type(panel_msg.reply_markup).__name__}")
-        for i, row in enumerate(panel_msg.reply_markup.rows):
+        rm = panel_msg.reply_markup
+        log_bot.info(
+            f"casino: [raw{label}] msg_id={panel_msg.id} "
+            f"markup_class={type(rm).__name__}"
+        )
+        try:
+            rep = repr(rm)
+            log_bot.info(f"casino: [raw{label}] repr={rep[:600]}")
+        except Exception:
+            pass
+
+        for i, row in enumerate(rm.rows):
             for j, b in enumerate(row.buttons):
-                text = getattr(b, "text", "?")
-                data = getattr(b, "data", b"")
-                tname = type(b).__name__
+                btype = type(b).__name__
+                btext = getattr(b, "text", None)
+                bdata = getattr(b, "data", None)
+                burl = getattr(b, "url", None)
+                bquery = getattr(b, "query", None)
                 log_bot.info(
-                    f"casino: [debug] button [{i}][{j}] "
-                    f"text={text!r} type={tname} "
-                    f"data_len={len(data) if data else 0}"
+                    f"casino: [raw{label}] btn[{i}][{j}] "
+                    f"type={btype} text={btext!r} "
+                    f"data={bdata!r} url={burl!r} query={bquery!r}"
                 )
+                try:
+                    attrs = {}
+                    for k in dir(b):
+                        if k.startswith("_"):
+                            continue
+                        try:
+                            v = getattr(b, k)
+                        except Exception:
+                            continue
+                        if callable(v):
+                            continue
+                        attrs[k] = v
+                    log_bot.info(
+                        f"casino: [raw{label}] btn[{i}][{j}] attrs={attrs}"
+                    )
+                except Exception:
+                    pass
     except Exception as e:
-        log_bot.warning(f"casino: log buttons failed: {e}")
+        log_bot.warning(f"casino: dump raw failed: {e}")
 
 
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
-    """Click an inline button. Multi-method fallback."""
     if btn is None:
         log_bot.warning("casino: click called with None button")
         return False
@@ -217,8 +144,8 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
         btext = getattr(btn, "text", "")
         data = getattr(btn, "data", None)
         log_bot.info(
-            f"casino: [click] button type={btype} text={btext!r} "
-            f"data_len={len(data) if data else 0}"
+            f"casino: [click] type={btype} text={btext!r} "
+            f"data={data!r} data_len={len(data) if data else 0}"
         )
 
         msg = await client.get_messages(chat_id, ids=message_id)
@@ -226,34 +153,36 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
             log_bot.warning("casino: [click] message not found")
             return False
 
-        # Method 1: msg.click with explicit data
         if data:
             try:
                 await msg.click(data=data)
                 log_bot.info("casino: [click] OK via msg.click(data=...)")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] data click failed: {type(e).__name__}: {e}")
+                log_bot.warning(
+                    f"casino: [click] data click failed: {type(e).__name__}: {e}"
+                )
 
-        # Method 2: native btn.click()
         if hasattr(btn, "click") and callable(getattr(btn, "click")):
             try:
                 await btn.click()
                 log_bot.info("casino: [click] OK via btn.click()")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] btn.click() failed: {type(e).__name__}: {e}")
+                log_bot.warning(
+                    f"casino: [click] btn.click() failed: {type(e).__name__}: {e}"
+                )
 
-        # Method 3: msg.click by text
         if btext:
             try:
                 await msg.click(text=btext)
                 log_bot.info("casino: [click] OK via msg.click(text=...)")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] text click failed: {type(e).__name__}: {e}")
+                log_bot.warning(
+                    f"casino: [click] text click failed: {type(e).__name__}: {e}"
+                )
 
-        # Method 4: raw GetBotCallbackAnswerRequest with data
         if data:
             try:
                 await client(GetBotCallbackAnswerRequest(
@@ -264,14 +193,15 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
                 log_bot.info("casino: [click] OK via raw GetBotCallbackAnswer")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] raw answer failed: {type(e).__name__}: {e}")
+                log_bot.warning(
+                    f"casino: [click] raw answer failed: {type(e).__name__}: {e}"
+                )
 
         log_bot.error("casino: [click] all methods failed")
         return False
     except Exception as e:
         log_bot.warning(
-            f"casino: [click] FAILED text={getattr(btn, 'text', '?')!r} "
-            f"{type(e).__name__}: {e}"
+            f"casino: [click] FAILED {type(e).__name__}: {e}"
         )
         return False
 
@@ -368,17 +298,13 @@ def _next_bet(cfg: dict, result: str, multiplier: float) -> int:
     initial = int(cfg["initial_bet"])
     max_bet = int(cfg["max_bet"])
     mults = _parse_multipliers(cfg)
-
     if result == "lose":
         factor = max(mults) if mults else 3.0
         nxt = int(current * factor)
     elif result == "win":
         nxt = initial
-    elif result == "push":
-        nxt = current
     else:
         nxt = current
-
     if nxt < int(cfg["min_bet"]):
         nxt = int(cfg["min_bet"])
     if nxt > max_bet:
@@ -430,7 +356,7 @@ def _get_state_by_chat(chat_id: int) -> Optional[CasinoState]:
 
 
 # ===========================================================================
-# Persistent listener
+# Listener
 # ===========================================================================
 def install_casino_listener(runtime, user_id: int, client) -> None:
     if client is None:
@@ -480,12 +406,10 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
 
 
 # ===========================================================================
-# Scheduler loop
+# Loop
 # ===========================================================================
 async def casino_loop(runtime, user_id: int) -> None:
     log_bot.info(f"casino: loop started for uid={user_id}")
-    st = _get_state(user_id)
-
     while not runtime.stop_event.is_set():
         cfg = get_config(user_id)
         if not cfg["enabled"] or not cfg["chat_id"]:
@@ -512,11 +436,6 @@ async def casino_loop(runtime, user_id: int) -> None:
             await _run_cycle(runtime, user_id)
         except Exception as e:
             log_bot.exception(f"casino: cycle failed for uid={user_id}: {e}")
-            try:
-                db.add_casino_log(user_id, cfg["chat_id"], "error",
-                                  f"cycle failed: {e}")
-            except Exception:
-                pass
 
         cfg = get_config(user_id)
         interval = int(cfg.get("bet_interval") or DEFAULT_INTERVAL)
@@ -529,11 +448,9 @@ async def casino_loop(runtime, user_id: int) -> None:
         except asyncio.TimeoutError:
             pass
 
-    log_bot.info(f"casino: loop stopped for uid={user_id}")
-
 
 # ===========================================================================
-# Single cycle
+# Cycle
 # ===========================================================================
 async def _run_cycle(runtime, user_id: int) -> None:
     cfg = get_config(user_id)
@@ -556,13 +473,11 @@ async def _run_cycle(runtime, user_id: int) -> None:
         st.run_id = _rand_id()
         st.stage = "starting"
         st.started_at = time.time()
-        st.deadline = st.started_at + GAME_TIMEOUT
         st.result = ""
         st.multiplier = 0.0
         st.score = 0
         st.emoji = ""
         st.panel_msg_id = None
-
         if cfg.get("panel_msg_id"):
             st.last_panel_id = int(cfg["panel_msg_id"])
 
@@ -574,187 +489,127 @@ async def _run_cycle(runtime, user_id: int) -> None:
         "status": "started",
         "started_at": _now_iso(),
     })
-    db.add_casino_log(user_id, chat_id, "info",
-                      f"run started bet={_format_amount(bet)}")
 
     try:
         result = await _play_round(runtime, client, user_id, chat_id, bet, st)
         await _finalize_run(user_id, chat_id, bet, result)
     except asyncio.TimeoutError as e:
-        db.add_casino_log(user_id, chat_id, "error", f"timeout: {e}")
         db.update_casino_run(st.run_id, status="timeout",
                               error=str(e), finished_at=_now_iso())
     except Exception as e:
-        tb = traceback.format_exc()
-        db.add_casino_log(user_id, chat_id, "error", f"play failed: {e}")
         db.update_casino_run(st.run_id, status="error",
                               error=f"{type(e).__name__}: {e}",
                               finished_at=_now_iso())
-        log_bot.error(f"casino: cycle exception:\n{tb}")
+        log_bot.error(f"casino: cycle exception: {traceback.format_exc()}")
 
 
 async def _play_round(runtime, client, user_id: int, chat_id: int,
                        bet: int, st: CasinoState) -> str:
     try:
         # ---------- 1. Send "Casino" ----------
-        log_bot.info(f"casino: [1] sending '{CASINO_TRIGGER_TEXT}' uid={user_id}")
-        sent_msg = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
+        sent_msg = await client.send_message(chat_id, "Casino")
         sent_msg_id = sent_msg.id
-        log_bot.info(f"casino: [1] sent OK (msg_id={sent_msg_id})")
+        log_bot.info(f"casino: [1] sent (msg_id={sent_msg_id})")
 
         await asyncio.sleep(3.0)
 
         # ---------- 2. Find panel ----------
         panel_msg = None
-
         if st.last_panel_id:
-            log_bot.info(
-                f"casino: [2] checking cached panel id={st.last_panel_id}"
-            )
             cached = await _get_message(client, chat_id, st.last_panel_id)
             if _msg_has_clickable(cached):
                 panel_msg = cached
-                log_bot.info(
-                    f"casino: [2] cached panel id={cached.id} is valid"
-                )
-            else:
-                log_bot.info(
-                    f"casino: [2] cached panel id={st.last_panel_id} not valid"
-                )
-                st.last_panel_id = None
+                log_bot.info(f"casino: [2] using cached panel id={cached.id}")
 
         if panel_msg is None:
-            log_bot.info("casino: [2] finding panel message (retry loop)")
             for attempt in range(1, 11):
                 await asyncio.sleep(2.0)
-                log_bot.info(f"casino: [2] attempt {attempt}/10")
                 panel_msg = await _find_panel_after_message(
                     client, chat_id, sent_msg_id
                 )
                 if panel_msg is not None:
                     log_bot.info(f"casino: [2] found panel on attempt {attempt}")
                     break
-                log_bot.info(f"casino: [2] attempt {attempt} - not found yet")
 
         if panel_msg is None:
-            log_bot.error("casino: [2] FAILED - panel not found after 10 attempts")
-            raise TimeoutError("casino panel not found after trigger")
+            raise TimeoutError("panel not found")
 
         st.panel_msg_id = panel_msg.id
         st.last_panel_id = panel_msg.id
         save_config(user_id, panel_msg_id=panel_msg.id)
         log_bot.info(f"casino: [2] panel msg id={panel_msg.id}")
 
-        _log_all_buttons(panel_msg)
+        # ---------- DUMP raw markup ----------
+        _dump_raw_markup(panel_msg, label="initial")
 
-        # ---------- 3. Click "WHEEL OF FORTUNE" (2nd button in first row) ----------
+        # ---------- 3. Click WHEEL OF FORTUNE ----------
         log_bot.info("casino: [3] looking for wheel button")
-        btn = _find_button(panel_msg, WHEEL_BUTTON_PATTERNS)
-        if btn is None:
-            log_bot.info(
-                f"casino: [3] wheel not found by text, trying position "
-                f"[{WHEEL_BUTTON_ROW}][{WHEEL_BUTTON_COL}]"
-            )
-            btn = _find_button_by_position(
-                panel_msg, row=WHEEL_BUTTON_ROW, col=WHEEL_BUTTON_COL
-            )
-        if btn is None:
-            log_bot.warning(
-                f"casino: [3] position [{WHEEL_BUTTON_ROW}][{WHEEL_BUTTON_COL}] "
-                f"failed, falling back to [0][0]"
-            )
-            btn = _find_button_by_position(panel_msg, row=0, col=0)
-        if btn is None:
-            log_bot.error("casino: [3] FAILED - wheel button not found")
-            raise TimeoutError("wheel of fortune button not found")
+
+        btn_by_text = None
+        btn_by_pos_00 = None
+        btn_by_pos_01 = None
+        btn_by_pos_02 = None
+        btn_by_pos_10 = None
+
+        try:
+            rm = panel_msg.reply_markup
+            for i, row in enumerate(rm.rows):
+                for j, b in enumerate(row.buttons):
+                    btext = (getattr(b, "text", "") or "").lower()
+                    # match by text patterns
+                    if (re.search(r"wheel\s*of\s*fortune", btext)
+                            or "ᴡʜᴇᴇʟ" in btext
+                            or "ꜰᴏʀᴛᴜɴᴇ" in btext
+                            or "fortune" in btext):
+                        btn_by_text = b
+                        log_bot.info(
+                            f"casino: [3] matched WHEEL by text at [{i}][{j}]"
+                        )
+                    # capture positions
+                    if i == 0 and j == 0:
+                        btn_by_pos_00 = b
+                    if i == 0 and j == 1:
+                        btn_by_pos_01 = b
+                    if i == 0 and j == 2:
+                        btn_by_pos_02 = b
+                    if i == 1 and j == 0:
+                        btn_by_pos_10 = b
+        except Exception as e:
+            log_bot.warning(f"casino: [3] enumerate failed: {e}")
+
+        # Decide which button to click
+        target_btn = None
+        target_label = ""
+        if btn_by_text is not None:
+            target_btn = btn_by_text
+            target_label = "by-text"
+        elif btn_by_pos_01 is not None:
+            target_btn = btn_by_pos_01
+            target_label = "[0][1]"
+        elif btn_by_pos_00 is not None:
+            target_btn = btn_by_pos_00
+            target_label = "[0][0]"
+
+        if target_btn is None:
+            log_bot.error("casino: [3] no button found to click")
+            raise TimeoutError("no button")
+
         log_bot.info(
-            f"casino: [3] clicking wheel button "
-            f"(text={getattr(btn, 'text', '?')!r} "
-            f"data_len={len(getattr(btn, 'data', b'')) or 0})"
+            f"casino: [3] clicking {target_label} "
+            f"text={getattr(target_btn, 'text', '?')!r} "
+            f"data={getattr(target_btn, 'data', None)!r}"
         )
-        ok = await _click_button(client, chat_id, panel_msg.id, btn)
+        ok = await _click_button(client, chat_id, panel_msg.id, target_btn)
         log_bot.info(f"casino: [3] click returned {ok}")
         await asyncio.sleep(3.0)
 
-        # ---------- 4. Click "SET ENTRANCE FEE" ----------
-        log_bot.info("casino: [4] looking for set-entrance button")
+        # ---------- Log post-click markup ----------
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        _log_all_buttons(panel_msg)
-        btn = _find_button(panel_msg, SET_ENTRANCE_PATTERNS)
-        if btn is None:
-            log_bot.info("casino: [4] not found by text, trying position [0][0]")
-            btn = _find_button_by_position(panel_msg, row=0, col=0)
-        if btn is not None:
-            log_bot.info(f"casino: [4] clicking set-entrance "
-                         f"(text={getattr(btn, 'text', '?')!r})")
-            await _click_button(client, chat_id, panel_msg.id, btn)
-            await asyncio.sleep(2.0)
-        else:
-            log_bot.warning("casino: [4] set-entrance-fee button not found, skipping")
+        _dump_raw_markup(panel_msg, label="after-click")
 
-        # ---------- 5. Reply with bet amount ----------
-        log_bot.info(f"casino: [5] replying with bet {_format_amount(bet)}")
-        panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        await client.send_message(
-            chat_id,
-            _format_amount(bet),
-            reply_to=panel_msg.id,
-        )
-        log_bot.info("casino: [5] reply sent")
-        await asyncio.sleep(3.0)
-
-        # ---------- 6. Click "SET NUMBER OF PLAYERS" ----------
-        log_bot.info("casino: [6] looking for set-players button")
-        panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        _log_all_buttons(panel_msg)
-        btn = _find_button(panel_msg, SET_PLAYERS_PATTERNS)
-        if btn is None:
-            log_bot.info("casino: [6] not found by text, trying position [0][0]")
-            btn = _find_button_by_position(panel_msg, row=0, col=0)
-        if btn is not None:
-            log_bot.info("casino: [6] clicking set-players")
-            await _click_button(client, chat_id, panel_msg.id, btn)
-            await asyncio.sleep(2.0)
-
-            log_bot.info("casino: [6b] looking for '1' button")
-            panel_msg = await _get_message(client, chat_id, panel_msg.id)
-            _log_all_buttons(panel_msg)
-            btn = _find_button_by_text(panel_msg, ["1", "1️⃣", "₁"])
-            if btn is None:
-                log_bot.info("casino: [6b] not found by text, trying position [0][0]")
-                btn = _find_button_by_position(panel_msg, row=0, col=0)
-            if btn is not None:
-                log_bot.info("casino: [6b] clicking '1'")
-                await _click_button(client, chat_id, panel_msg.id, btn)
-                await asyncio.sleep(2.0)
-
-        # ---------- 7. Click "CREATE GAMBLING TABLE" ----------
-        log_bot.info("casino: [7] looking for create-table button")
-        panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        _log_all_buttons(panel_msg)
-        btn = _find_button(panel_msg, CREATE_TABLE_PATTERNS)
-        if btn is None:
-            log_bot.info("casino: [7] not found by text, trying position [0][0]")
-            btn = _find_button_by_position(panel_msg, row=0, col=0)
-        if btn is not None:
-            log_bot.info("casino: [7] clicking create-table")
-            await _click_button(client, chat_id, panel_msg.id, btn)
-            await asyncio.sleep(2.5)
-
-        # ---------- 8. Reply with 🎰 emoji ----------
-        log_bot.info(f"casino: [8] sending emoji {EMOJI_TRIGGER}")
-        panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        await client.send_message(
-            chat_id,
-            EMOJI_TRIGGER,
-            reply_to=panel_msg.id,
-        )
-        log_bot.info("casino: [8] emoji sent")
-        st.timer_msg_id = panel_msg.id
-
-        # ---------- 9. Poll for result ----------
-        log_bot.info("casino: [9] polling for result")
-        return await _poll_result(client, chat_id, panel_msg.id, st)
+        log_bot.info("casino: [debug] stopping after click for inspection")
+        return "debug"
 
     except Exception as e:
         log_bot.error(
@@ -765,121 +620,37 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 
 async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
-    """Find the panel message via reply detection + fallbacks."""
-    st = _get_state_by_chat(chat_id)
     try:
         msgs = await client.get_messages(chat_id, limit=50)
-
-        # Priority 1: reply to our trigger
-        log_bot.info(
-            f"casino: [panel] looking for reply to trigger {sent_msg_id}"
-        )
-        reply_candidates = []
         for m in msgs:
             reply_to = getattr(m, "reply_to_msg_id", None)
-            if reply_to and reply_to == sent_msg_id:
-                reply_candidates.append(m)
-
-        if reply_candidates:
-            log_bot.info(
-                f"casino: [panel] found {len(reply_candidates)} replies"
-            )
-            for m in reply_candidates:
-                log_bot.info(
-                    f"casino: [panel] reply msg id={m.id} "
-                    f"has_markup={bool(m.reply_markup)}"
-                )
-                if _msg_has_clickable(m):
-                    log_bot.info(
-                        f"casino: [panel] FOUND clickable reply id={m.id}"
-                    )
-                    if st:
-                        st.last_panel_id = m.id
-                    return m
-
-        # Priority 2: newest clickable, newer than trigger
+            if reply_to == sent_msg_id and _msg_has_clickable(m):
+                return m
         best = None
-        best_id = 0
         for m in msgs:
             if m.id <= sent_msg_id:
                 continue
-            if not _msg_has_clickable(m):
-                continue
-            if m.id > best_id:
-                best = m
-                best_id = m.id
-
+            if _msg_has_clickable(m):
+                if best is None or m.id > best.id:
+                    best = m
         if best is not None:
-            log_bot.info(
-                f"casino: [panel] found newer clickable msg id={best.id}"
-            )
-            if st:
-                st.last_panel_id = best.id
             return best
-
-        # Priority 3: broad search
-        log_bot.info("casino: [panel] falling back to search last 200")
-        found = await _find_latest_panel(client, chat_id)
-        if found and st:
-            st.last_panel_id = found.id
-        return found
+        return await _find_latest_panel(client, chat_id)
     except Exception as e:
-        log_bot.warning(f"casino: [panel] failed: {type(e).__name__}: {e}")
+        log_bot.warning(f"casino: find panel failed: {e}")
         return None
 
 
 async def _find_latest_panel(client, chat_id: int):
-    """Find the newest message with a clickable inline button."""
     try:
         msgs = await client.get_messages(chat_id, limit=200)
-        log_bot.info(f"casino: [panel] fetched {len(msgs)} messages")
-
         best = None
-        best_id = 0
-        markup_count = 0
-
         for m in msgs:
-            if not m.reply_markup:
-                continue
-            markup_count += 1
-            if markup_count <= 10:
-                btns = []
-                if hasattr(m.reply_markup, "rows"):
-                    for row in m.reply_markup.rows:
-                        for b in row.buttons:
-                            btype = type(b).__name__
-                            btns.append(f"{btype}:{getattr(b, 'text', '')[:10]}")
-                log_bot.info(
-                    f"casino: [panel] msg {m.id} markup has buttons: {btns}"
-                )
-            if not _msg_has_clickable(m):
-                continue
-            if m.id > best_id:
-                best = m
-                best_id = m.id
-
-        log_bot.info(
-            f"casino: [panel] found {markup_count} msgs with reply_markup total"
-        )
-
-        if best is None:
-            log_bot.warning("casino: [panel] no clickable panel found")
-            return None
-
-        log_bot.info(f"casino: [panel] selected msg id={best.id}")
-        for i, row in enumerate(best.reply_markup.rows):
-            for j, b in enumerate(row.buttons):
-                text = getattr(b, "text", "?")
-                data = getattr(b, "data", b"")
-                tname = type(b).__name__
-                log_bot.info(
-                    f"casino: [panel] button [{i}][{j}] "
-                    f"text={text!r} type={tname} "
-                    f"data_len={len(data) if data else 0}"
-                )
+            if _msg_has_clickable(m):
+                if best is None or m.id > best.id:
+                    best = m
         return best
-    except Exception as e:
-        log_bot.warning(f"casino: [panel] failed: {type(e).__name__}: {e}")
+    except Exception:
         return None
 
 
@@ -890,120 +661,16 @@ async def _get_message(client, chat_id: int, msg_id: int):
         return None
 
 
-async def _poll_result(client, chat_id: int, msg_id: int,
-                        st: CasinoState) -> str:
-    last_text = ""
-    deadline = time.time() + GAME_TIMEOUT
-
-    while time.time() < deadline:
-        await asyncio.sleep(POLL_INTERVAL)
-        msg = await _get_message(client, chat_id, msg_id)
-        if msg is None:
-            continue
-        text = msg.message or ""
-        if not text or text == last_text:
-            continue
-        last_text = text
-
-        result = _parse_result(text)
-        if result is not None:
-            st.result = result["result"]
-            st.multiplier = result["multiplier"]
-            st.score = result["score"]
-            st.emoji = result["emoji"]
-            log_bot.info(f"casino: result parsed {result}")
-            return result["result"]
-
-    return "timeout"
-
-
-def _parse_result(text: str) -> Optional[dict]:
-    if not text:
-        return None
-    low = text.lower()
-
-    m = re.search(r"score\s*[:：]\s*(\d+)\s*\|\s*(.+)", low)
-    if not m:
-        return None
-    score = int(m.group(1))
-    tail = m.group(2).strip()
-
-    emoji = ""
-    for ch in tail:
-        if ord(ch) > 0x2000:
-            emoji = ch
-            break
-
-    win_symbols = ["🍇", "🍒", "bar", "💎", "🎰", "7️⃣", "7"]
-    lose_symbols = ["0", "❌", "💀", "empty", "no win", "lose"]
-
-    if any(s in tail for s in win_symbols):
-        return {"result": "win", "multiplier": 0, "score": score, "emoji": emoji}
-    if any(s in tail for s in lose_symbols):
-        return {"result": "lose", "multiplier": 0, "score": score, "emoji": emoji}
-
-    return {"result": "push", "multiplier": 0, "score": score, "emoji": emoji}
-
-
 async def _finalize_run(user_id: int, chat_id: int, bet: int,
                          result: str) -> None:
     cfg = get_config(user_id)
     st = _get_state(user_id)
-    mults = _parse_multipliers(cfg)
-
-    if result == "win":
-        mult = random.choice(mults) if mults else 2.0
-    elif result == "push":
-        mult = 1.0
-    else:
-        mult = 0.0
-
-    if result == "win":
-        profit = int(bet * (mult - 1))
-    elif result == "push":
-        profit = 0
-    else:
-        profit = -bet
-
-    next_bet = _next_bet(cfg, result, mult)
-
+    save_config(user_id, total_plays=cfg["total_plays"] + 1)
     db.update_casino_run(
         st.run_id,
-        multiplier=float(mult),
         result=result,
-        score=st.score,
-        emoji=st.emoji,
-        profit=int(profit),
         status="finished",
         finished_at=_now_iso(),
-    )
-
-    total_plays = cfg["total_plays"] + 1
-    total_wins = cfg["total_wins"] + (1 if result == "win" else 0)
-    total_losses = cfg["total_losses"] + (1 if result == "lose" else 0)
-    total_pushes = cfg["total_pushes"] + (1 if result == "push" else 0)
-    total_profit = cfg["total_profit"] + int(profit)
-    peak_bet = max(cfg["peak_bet"], bet)
-
-    save_config(
-        user_id,
-        current_bet=int(next_bet),
-        total_plays=total_plays,
-        total_wins=total_wins,
-        total_losses=total_losses,
-        total_pushes=total_pushes,
-        total_profit=total_profit,
-        peak_bet=peak_bet,
-    )
-
-    db.add_casino_log(
-        user_id, chat_id, "info",
-        f"result={result} bet={_format_amount(bet)} "
-        f"mult={mult} profit={profit} next={_format_amount(next_bet)}"
-    )
-    log_bot.info(
-        f"casino: run done uid={user_id} result={result} "
-        f"profit={profit} next_bet={next_bet}"
     )
 
 
@@ -1021,7 +688,6 @@ async def ensure_loop(runtime, user_id: int) -> None:
     st = _STATES.get(int(user_id))
     if st is None:
         asyncio.create_task(casino_loop(runtime, user_id))
-        log_bot.info(f"casino: spawned loop for uid={user_id}")
 
 
 async def trigger_now(runtime, user_id: int) -> dict:
@@ -1031,9 +697,7 @@ async def trigger_now(runtime, user_id: int) -> dict:
     client = runtime.user_clients.get(int(user_id))
     if client is None:
         return {"ok": False, "error": "user client not connected"}
-
     save_config(user_id, next_run="")
-
     try:
         await _run_cycle(runtime, user_id)
         return {"ok": True}
