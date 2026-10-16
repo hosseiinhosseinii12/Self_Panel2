@@ -645,6 +645,29 @@ async def _find_latest_panel(client, chat_id: int):
         msgs = await client.get_messages(chat_id, limit=50)
         log_bot.info(f"casino: [panel] fetched {len(msgs)} messages")
 
+        # ====== DEBUG: log first 15 messages ======
+        for idx, m in enumerate(msgs[:15]):
+            try:
+                sender_id = getattr(m, "sender_id", None)
+                text_preview = (m.message or "")[:50].replace("\n", " ")
+                has_markup = bool(m.reply_markup)
+                markup_type = type(m.reply_markup).__name__ if m.reply_markup else "None"
+                button_info = ""
+                if m.reply_markup and hasattr(m.reply_markup, "rows"):
+                    for row in m.reply_markup.rows:
+                        for b in row.buttons:
+                            btype = type(b).__name__
+                            btext = getattr(b, "text", "")
+                            button_info += f"[{btype}:{btext[:15]}]"
+                log_bot.info(
+                    f"casino: [panel] msg[{idx}] id={m.id} "
+                    f"sender={sender_id} markup={markup_type} "
+                    f"buttons={button_info} text={text_preview!r}"
+                )
+            except Exception as ee:
+                log_bot.warning(f"casino: [panel] debug msg[{idx}] failed: {ee}")
+        # ====== END DEBUG ======
+
         best = None
         best_id = 0
         for m in msgs:
