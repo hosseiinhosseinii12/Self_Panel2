@@ -1,0 +1,62 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 1080,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true,
+        "ip": "127.0.0.1"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.63.94",
+            "port": 2087,
+            "users": [
+              {
+                "id": "cf8a6224-1855-45a0-be64-76289bac5b54",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "misty-garden-fa6c-03a4df3e.pages.dev",
+          "fingerprint": "chrome",
+          "allowInsecure": false,
+          "alpn": ["http/1.1"],
+          "echConfigList": "cloudflare-ech.com+udp://1.1.1.1"
+        },
+        "wsSettings": {
+          "path": "/98643feed4c6",
+          "headers": {
+            "Host": "misty-garden-fa6c-03a4df3e.pages.dev"
+          }
+        }
+      }
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
