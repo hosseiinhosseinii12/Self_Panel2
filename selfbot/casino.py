@@ -1,17 +1,7 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
-Uses a persistent event listener on the user client to capture the panel
-message id whenever Meowie Casino sends or edits a message with inline
-buttons. The id is cached in the state AND in the database so it survives
-restarts.
-
-Every N seconds (default 301s = 5m 1s) after the previous game ends:
-  1. Sends the literal text "Casino" to the configured chat
-  2. Waits for the bot's panel message (from listener cache or retry)
-  3. Clicks the "WHEEL OF FORTUNE" inline button
-  4. Sets entrance fee, players, creates table, sends 🎰 emoji
-  5. Reads the result from the edited message
-  6. Applies the martingale multiplier strategy
+Uses iter_messages with min_id to find new panel messages after the trigger.
+Also maintains a persistent listener on the user client.
 """
 import asyncio
 import random
@@ -64,7 +54,7 @@ CREATE_TABLE_PATTERNS = [
 ]
 EMOJI_TRIGGER = "🎰"
 
-DEFAULT_INTERVAL = 301  # 5 min 1 sec
+DEFAULT_INTERVAL = 301
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 0.4
 
@@ -81,7 +71,6 @@ def _now_iso() -> str:
 
 
 def _format_amount(n: int) -> str:
-    """Format 100000 → '100k'."""
     if n >= 1_000_000_000:
         return f"{n // 1_000_000_000}g"
     if n >= 1_000_000:
@@ -92,7 +81,6 @@ def _format_amount(n: int) -> str:
 
 
 def _button_text(btn) -> str:
-    """Extract text from an inline button."""
     if btn is None:
         return ""
     return (getattr(btn, "text", "") or "").strip().lower()
@@ -107,7 +95,6 @@ def _match_any(text: str, patterns: list) -> bool:
 
 
 def _msg_has_clickable(msg) -> bool:
-    """Check if a message has at least one inline button with `data`."""
     if not msg or not msg.reply_markup:
         return False
     if not hasattr(msg.reply_markup, "rows"):
@@ -120,9 +107,6 @@ def _msg_has_clickable(msg) -> bool:
 
 
 def _find_button(msg, patterns: list):
-    """Find the first inline button whose text matches any pattern.
-    Accepts any inline button that has `data` (including KeyboardInlineButton).
-    """
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -143,7 +127,6 @@ def _find_button(msg, patterns: list):
 
 
 def _find_button_by_text(msg, exact_texts: list):
-    """Find inline button whose text equals one of exact_texts."""
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -160,7 +143,6 @@ def _find_button_by_text(msg, exact_texts: list):
 
 
 def _find_button_by_position(msg, row: int = 0, col: int = 0):
-    """Find an inline button by row/column position (0-indexed)."""
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -179,7 +161,6 @@ def _find_button_by_position(msg, row: int = 0, col: int = 0):
 
 
 def _log_all_buttons(panel_msg) -> None:
-    """Debug: log every inline button in the panel message."""
     try:
         if not panel_msg:
             log_bot.info("casino: [debug] panel_msg is None")
@@ -204,7 +185,6 @@ def _log_all_buttons(panel_msg) -> None:
 
 
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
-    """Click an inline callback button using Telethon's native msg.click()."""
     if btn is None:
         log_bot.warning("casino: click called with None button")
         return False
@@ -213,18 +193,15 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
         if not data:
             log_bot.warning("casino: button has no data, cannot click")
             return False
-
         log_bot.info(
             f"casino: [click] fetching message for click "
             f"peer={chat_id} msg={message_id} "
             f"text={getattr(btn, 'text', '?')!r} data_len={len(data)}"
         )
-
         msg = await client.get_messages(chat_id, ids=message_id)
         if msg is None:
             log_bot.warning("casino: [click] message not found")
             return False
-
         result = await msg.click(data=data)
         log_bot.info(
             f"casino: [click] OK text={getattr(btn, 'text', '?')!r} "
@@ -327,7 +304,6 @@ def _parse_multipliers(cfg: dict) -> list:
 
 
 def _next_bet(cfg: dict, result: str, multiplier: float) -> int:
-    """Return the next bet amount based on the last result."""
     current = int(cfg.get("current_bet") or cfg["initial_bet"])
     initial = int(cfg["initial_bet"])
     max_bet = int(cfg["max_bet"])
@@ -351,11 +327,9 @@ def _next_bet(cfg: dict, result: str, multiplier: float) -> int:
 
 
 # ===========================================================================
-# Scheduler loop
+# State
 # ===========================================================================
 class CasinoState:
-    """In-memory state for the currently running casino cycle."""
-
     def __init__(self):
         self.user_id: Optional[int] = None
         self.chat_id: Optional[int] = None
@@ -376,7 +350,7 @@ class CasinoState:
         self.listener_installed: bool = False
 
 
-_STATES: dict = {}  # user_id -> CasinoState
+_STATES: dict = {}
 
 
 def _get_state(user_id: int) -> CasinoState:
@@ -396,13 +370,9 @@ def _get_state_by_chat(chat_id: int) -> Optional[CasinoState]:
 
 
 # ===========================================================================
-# LISTENER — captures panel message id whenever Meowie edits/sends
+# Persistent listener
 # ===========================================================================
 def install_casino_listener(runtime, user_id: int, client) -> None:
-    """Install a permanent event listener on the user client that captures
-    the panel message id whenever a message with inline buttons is sent or
-    edited. Called from bootstrap and bot_handlers after login/loading.
-    """
     if client is None:
         return
     if getattr(client, "_casino_listener_installed", False):
@@ -427,7 +397,7 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
         except Exception as e:
             log_bot.debug(f"casino: listener new error: {e}")
 
-    @client.on(events.MessageEdited())
+    @client.on(events.MessageEdited(incoming=True))
     async def _on_edit(event):
         try:
             if not _msg_has_clickable(event):
@@ -453,7 +423,6 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
 # Scheduler loop
 # ===========================================================================
 async def casino_loop(runtime, user_id: int) -> None:
-    """Main loop for a single user's casino automation."""
     log_bot.info(f"casino: loop started for uid={user_id}")
     st = _get_state(user_id)
 
@@ -515,7 +484,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
         db.add_casino_log(user_id, chat_id, "error", "user client not connected")
         return
 
-    # Ensure listener is installed (in case it was missed)
     try:
         install_casino_listener(runtime, user_id, client)
     except Exception as e:
@@ -535,7 +503,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
         st.emoji = ""
         st.panel_msg_id = None
 
-        # Load cached panel id from DB
         if cfg.get("panel_msg_id"):
             st.last_panel_id = int(cfg["panel_msg_id"])
 
@@ -568,7 +535,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
 
 async def _play_round(runtime, client, user_id: int, chat_id: int,
                        bet: int, st: CasinoState) -> str:
-    """Run one full game cycle. Returns 'win' | 'lose' | 'push' | 'timeout'."""
     try:
         # ---------- 1. Send "Casino" ----------
         log_bot.info(f"casino: [1] sending '{CASINO_TRIGGER_TEXT}' uid={user_id}")
@@ -576,13 +542,11 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         sent_msg_id = sent_msg.id
         log_bot.info(f"casino: [1] sent OK (msg_id={sent_msg_id})")
 
-        # Give the listener a chance to capture the new panel
         await asyncio.sleep(3.0)
 
         # ---------- 2. Find panel ----------
         panel_msg = None
 
-        # Strategy A: check cached last_panel_id (from listener or DB)
         if st.last_panel_id:
             log_bot.info(
                 f"casino: [2] checking cached panel id={st.last_panel_id}"
@@ -599,7 +563,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
                 )
                 st.last_panel_id = None
 
-        # Strategy B: retry loop with reply/newer detection
         if panel_msg is None:
             log_bot.info("casino: [2] finding panel message (retry loop)")
             for attempt in range(1, 11):
@@ -732,50 +695,32 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
     """Find the panel message.
-    Strategies:
-      1. reply to our trigger
-      2. newest message with clickable buttons, newer than trigger
-      3. fall back to broad search (200 messages)
+    Uses iter_messages with min_id to get NEW messages after trigger.
     """
     st = _get_state_by_chat(chat_id)
     try:
-        msgs = await client.get_messages(chat_id, limit=20)
-
-        # Strategy 1: reply to our trigger
-        for m in msgs:
-            reply_to = getattr(m, "reply_to_msg_id", None)
-            if reply_to and reply_to == sent_msg_id:
-                if _msg_has_clickable(m):
-                    log_bot.info(
-                        f"casino: [panel] found reply msg id={m.id} "
-                        f"to trigger {sent_msg_id}"
-                    )
-                    if st:
-                        st.last_panel_id = m.id
-                    return m
-
-        # Strategy 2: newest message with clickable buttons, newer than trigger
-        best = None
-        best_id = 0
-        for m in msgs:
-            if m.id <= sent_msg_id:
-                continue
-            if not _msg_has_clickable(m):
-                continue
-            if m.id > best_id:
-                best = m
-                best_id = m.id
-
-        if best is not None:
+        log_bot.info(f"casino: [panel] searching messages newer than {sent_msg_id}")
+        found_count = 0
+        async for m in client.iter_messages(chat_id, min_id=sent_msg_id, limit=20):
+            found_count += 1
             log_bot.info(
-                f"casino: [panel] found newer msg id={best.id} "
-                f"(trigger={sent_msg_id})"
+                f"casino: [panel] newer msg id={m.id} "
+                f"sender={getattr(m, 'sender_id', None)} "
+                f"has_markup={bool(m.reply_markup)} "
+                f"text={(m.message or '')[:40]!r}"
             )
-            if st:
-                st.last_panel_id = best.id
-            return best
+            if _msg_has_clickable(m):
+                log_bot.info(
+                    f"casino: [panel] FOUND clickable msg id={m.id}"
+                )
+                if st:
+                    st.last_panel_id = m.id
+                return m
 
-        # Strategy 3: broad search
+        log_bot.info(
+            f"casino: [panel] no clickable found in {found_count} newer messages"
+        )
+
         log_bot.info("casino: [panel] falling back to search last 200")
         found = await _find_latest_panel(client, chat_id)
         if found and st:
@@ -788,7 +733,7 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
 
 async def _find_latest_panel(client, chat_id: int):
     """Find the newest message with a clickable inline button.
-    Searches up to 200 messages back.
+    Logs every message that has a reply_markup.
     """
     try:
         msgs = await client.get_messages(chat_id, limit=200)
@@ -796,13 +741,31 @@ async def _find_latest_panel(client, chat_id: int):
 
         best = None
         best_id = 0
+        markup_count = 0
 
         for m in msgs:
+            if not m.reply_markup:
+                continue
+            markup_count += 1
+            if markup_count <= 10:
+                btns = []
+                if hasattr(m.reply_markup, "rows"):
+                    for row in m.reply_markup.rows:
+                        for b in row.buttons:
+                            btype = type(b).__name__
+                            btns.append(f"{btype}:{getattr(b, 'text', '')[:10]}")
+                log_bot.info(
+                    f"casino: [panel] msg {m.id} markup has buttons: {btns}"
+                )
             if not _msg_has_clickable(m):
                 continue
             if m.id > best_id:
                 best = m
                 best_id = m.id
+
+        log_bot.info(
+            f"casino: [panel] found {markup_count} msgs with reply_markup total"
+        )
 
         if best is None:
             log_bot.warning("casino: [panel] no clickable panel found")
@@ -834,7 +797,6 @@ async def _get_message(client, chat_id: int, msg_id: int):
 
 async def _poll_result(client, chat_id: int, msg_id: int,
                         st: CasinoState) -> str:
-    """Poll the panel message until a result appears."""
     last_text = ""
     deadline = time.time() + GAME_TIMEOUT
 
@@ -861,7 +823,6 @@ async def _poll_result(client, chat_id: int, msg_id: int,
 
 
 def _parse_result(text: str) -> Optional[dict]:
-    """Try to parse the game result from the panel text."""
     if not text:
         return None
     low = text.lower()
@@ -955,7 +916,6 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
 # Manager
 # ===========================================================================
 async def start_all_loops(runtime) -> None:
-    """Spawn a casino loop for each user with casino enabled."""
     for cfg_row in db.list_casino_enabled():
         uid = int(cfg_row["user_id"])
         asyncio.create_task(casino_loop(runtime, uid))
@@ -963,18 +923,13 @@ async def start_all_loops(runtime) -> None:
 
 
 async def ensure_loop(runtime, user_id: int) -> None:
-    """Ensure a casino loop is running for a given user."""
     st = _STATES.get(int(user_id))
     if st is None:
         asyncio.create_task(casino_loop(runtime, user_id))
         log_bot.info(f"casino: spawned loop for uid={user_id}")
 
 
-# ===========================================================================
-# Manual trigger
-# ===========================================================================
 async def trigger_now(runtime, user_id: int) -> dict:
-    """Manually run one cycle now. Returns a summary."""
     cfg = get_config(user_id)
     if not cfg["chat_id"]:
         return {"ok": False, "error": "no chat_id set"}
