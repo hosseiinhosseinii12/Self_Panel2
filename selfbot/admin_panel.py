@@ -23,6 +23,7 @@ from .transactions import for_user as tx_for_user, recent as tx_recent, \
     top_spenders, totals as tx_totals
 from .users import (active_last_24h, all_users, ban, count as user_count,
                     delete_user, get_user, new_last_7d, unban)
+from .casino_routes import register_casino_admin_routes
 
 try:
     import pyotp
@@ -126,9 +127,6 @@ BASE_TEMPLATE = r"""
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
 <style>
-/* ==========================================================================
-   DESIGN TOKENS
-   ========================================================================== */
 :root {
   --bg: #0a0a0c;
   --bg-2: #101014;
@@ -272,9 +270,6 @@ input, select, textarea { font-family: inherit; }
 ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: var(--r-pill); border: 2px solid var(--bg); }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-3); }
 
-/* ==========================================================================
-   LAYOUT
-   ========================================================================== */
 .layout {
   display: grid;
   grid-template-columns: 264px 1fr;
@@ -286,9 +281,6 @@ input, select, textarea { font-family: inherit; }
   .sidebar { display: none !important; }
 }
 
-/* ==========================================================================
-   SIDEBAR
-   ========================================================================== */
 .sidebar {
   background: var(--surface);
   border-right: 1px solid var(--border);
@@ -445,9 +437,6 @@ input, select, textarea { font-family: inherit; }
 [data-theme="light"] .theme-toggle .toggle-switch { background: var(--accent); }
 [data-theme="light"] .theme-toggle .toggle-switch::after { transform: translateX(14px); }
 
-/* ==========================================================================
-   MAIN
-   ========================================================================== */
 .main {
   padding: 40px 40px 80px;
   max-width: 1520px;
@@ -533,9 +522,6 @@ input, select, textarea { font-family: inherit; }
   margin-bottom: 10px;
 }
 
-/* ==========================================================================
-   BUTTONS
-   ========================================================================== */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -567,15 +553,13 @@ input, select, textarea { font-family: inherit; }
 .btn:active { transform: translateY(0); box-shadow: none; }
 .btn:focus-visible { outline: none; box-shadow: var(--shadow-ring); }
 
-.btn-primary,
-.btn-dark {
+.btn-primary, .btn-dark {
   background: var(--accent);
   color: var(--accent-fg);
   border-color: var(--accent);
   box-shadow: 0 1px 0 rgba(255,255,255,.08) inset, var(--shadow-xs);
 }
-.btn-primary:hover,
-.btn-dark:hover {
+.btn-primary:hover, .btn-dark:hover {
   background: var(--accent);
   border-color: var(--accent);
   filter: brightness(1.1);
@@ -623,9 +607,6 @@ input, select, textarea { font-family: inherit; }
   box-shadow: none;
 }
 
-/* ==========================================================================
-   FORMS
-   ========================================================================== */
 label {
   display: block;
   font-size: 12px;
@@ -687,9 +668,6 @@ select {
   min-width: 140px;
 }
 
-/* ==========================================================================
-   CARDS
-   ========================================================================== */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -725,9 +703,6 @@ select {
   margin-left: auto;
 }
 
-/* ==========================================================================
-   STATS
-   ========================================================================== */
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -796,9 +771,6 @@ select {
   letter-spacing: 0;
 }
 
-/* ==========================================================================
-   TABLES
-   ========================================================================== */
 .table-wrap {
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -849,9 +821,6 @@ tbody tr:hover td { background: var(--hover); }
 .muted { color: var(--text-2); }
 .dim { color: var(--text-3); }
 
-/* ==========================================================================
-   BADGES
-   ========================================================================== */
 .badge {
   display: inline-flex;
   align-items: center;
@@ -880,9 +849,14 @@ tbody tr:hover td { background: var(--hover); }
 .badge.blue { background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }
 .badge.purple { background: var(--purple-bg); color: var(--purple); border-color: var(--purple-border); }
 
-/* ==========================================================================
-   FLASH
-   ========================================================================== */
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
 .flash {
   padding: 12px 16px;
   border-radius: var(--r-md);
@@ -924,9 +898,6 @@ tbody tr:hover td { background: var(--hover); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* ==========================================================================
-   CHARTS
-   ========================================================================== */
 .card-chart { padding-bottom: 20px; }
 .card-chart h2 { margin-bottom: 20px; }
 
@@ -936,9 +907,6 @@ tbody tr:hover td { background: var(--hover); }
   margin: 0 -12px -12px;
 }
 
-/* ==========================================================================
-   GRID
-   ========================================================================== */
 .grid-2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -956,9 +924,6 @@ tbody tr:hover td { background: var(--hover); }
 @media (max-width: 1100px) { .grid-3 { grid-template-columns: 1fr; } }
 @media (max-width: 1000px) { .grid-2 { grid-template-columns: 1fr; } }
 
-/* ==========================================================================
-   LOGIN
-   ========================================================================== */
 .login-page {
   min-height: 100vh;
   display: grid;
@@ -1100,9 +1065,6 @@ tbody tr:hover td { background: var(--hover); }
   color: var(--text-3);
 }
 
-/* ==========================================================================
-   EMPTY / UTILITIES
-   ========================================================================== */
 .empty {
   padding: 48px 24px;
   text-align: center;
@@ -1135,9 +1097,6 @@ code {
   letter-spacing: -0.01em;
 }
 
-/* ==========================================================================
-   PAGE ENTER ANIMATIONS
-   ========================================================================== */
 .main > * {
   animation: page-in var(--t-slow) var(--ease-out) both;
 }
@@ -1182,6 +1141,12 @@ code {
     <a href="{{ url_for('transactions_page') }}" class="nav-link {{ 'active' if page=='tx' else '' }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
       Transactions
+    </a>
+
+    <div class="nav-group">Automation</div>
+    <a href="{{ url_for('casino_page') }}" class="nav-link {{ 'active' if page=='casino' else '' }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+      Casino
     </a>
 
     <div class="nav-group">System</div>
@@ -2490,5 +2455,17 @@ def build_admin_app() -> Flask:
                      admin_name=_current_admin_name())
         flash("2FA disabled.")
         return redirect(url_for("totp_page"))
+
+    # ---------- Casino routes ----------
+    register_casino_admin_routes(
+        app=app,
+        login_required=_login_required,
+        csrf_check=_csrf_check,
+        csrf_token=_csrf_token,
+        render_page=_render_page,
+        get_runtime_safe=_get_runtime_safe,
+        current_admin_id=_current_admin_id,
+        current_admin_name=_current_admin_name,
+    )
 
     return app

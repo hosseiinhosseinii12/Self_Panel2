@@ -230,6 +230,61 @@ CREATE TABLE IF NOT EXISTS text_format_settings (
     chats_filter TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
+
+-- =====================================================================
+-- Casino automator tables
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS casino_config (
+    user_id INTEGER PRIMARY KEY,
+    enabled INTEGER DEFAULT 0,
+    chat_id INTEGER,
+    initial_bet INTEGER DEFAULT 100000,
+    current_bet INTEGER DEFAULT 100000,
+    max_bet INTEGER DEFAULT 100000000,
+    min_bet INTEGER DEFAULT 1000,
+    bet_interval INTEGER DEFAULT 301,
+    multipliers TEXT DEFAULT '1.5,2,2.5,3',
+    strategy_mode TEXT DEFAULT 'martingale',
+    last_run TEXT DEFAULT '',
+    next_run TEXT DEFAULT '',
+    total_plays INTEGER DEFAULT 0,
+    total_wins INTEGER DEFAULT 0,
+    total_losses INTEGER DEFAULT 0,
+    total_pushes INTEGER DEFAULT 0,
+    total_profit INTEGER DEFAULT 0,
+    peak_bet INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS casino_runs (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    chat_id INTEGER,
+    bet_amount INTEGER,
+    multiplier REAL DEFAULT 0,
+    result TEXT DEFAULT '',
+    score INTEGER DEFAULT 0,
+    emoji TEXT DEFAULT '',
+    profit INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'started',
+    error TEXT DEFAULT '',
+    started_at TEXT DEFAULT '',
+    finished_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_casino_runs_user ON casino_runs(user_id);
+CREATE INDEX IF NOT EXISTS idx_casino_runs_status ON casino_runs(status);
+
+CREATE TABLE IF NOT EXISTS casino_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    chat_id INTEGER,
+    level TEXT DEFAULT 'info',
+    message TEXT DEFAULT '',
+    extra TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_casino_logs_user ON casino_logs(user_id);
 """
 
 
@@ -750,7 +805,7 @@ def clear_user_otp(user_id: int) -> None:
 
 
 # ===========================================================================
-# Text format settings
+# Text format
 # ===========================================================================
 def get_text_format(user_id: int) -> Optional[dict]:
     _ensure_ready()
@@ -798,3 +853,178 @@ def list_text_format_active() -> List[dict]:
         "OR strike = 1 OR spoiler = 1"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ===========================================================================
+# Casino config
+# ===========================================================================
+def get_casino_config(user_id: int) -> Optional[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM casino_config WHERE user_id = ?",
+                       (int(user_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_casino_config(user_id: int, **fields) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    existing = conn.execute("SELECT user_id FROM casino_config WHERE user_id = ?",
+                             (int(user_id),)).fetchone()
+    fields["updated_at"] = datetime.now(dt_timezone.utc).isoformat()
+    if existing is None:
+        cols = ["user_id"] + list(fields.keys())
+        vals = [int(user_id)] + list(fields.values())
+        placeholders = ",".join("?" * len(cols))
+        conn.execute(
+            f"INSERT INTO casino_config ({','.join(cols)}) "
+            f"VALUES ({placeholders})", vals,
+        )
+    else:
+        if not fields:
+            return
+        sets = []
+        vals = []
+        for k, v in fields.items():
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        vals.append(int(user_id))
+        conn.execute(f"UPDATE casino_config SET {','.join(sets)} WHERE user_id = ?",
+                     vals)
+
+
+def list_casino_enabled() -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM casino_config WHERE enabled = 1"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ===========================================================================
+# Casino runs
+# ===========================================================================
+def add_casino_run(run: dict) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO casino_runs
+           (id, user_id, chat_id, bet_amount, multiplier, result, score,
+            emoji, profit, status, error, started_at, finished_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            run["id"], int(run["user_id"]), int(run["chat_id"]),
+            int(run.get("bet_amount", 0)),
+            float(run.get("multiplier", 0)),
+            run.get("result", ""),
+            int(run.get("score", 0)),
+            run.get("emoji", ""),
+            int(run.get("profit", 0)),
+            run.get("status", "started"),
+            run.get("error", ""),
+            run.get("started_at", ""),
+            run.get("finished_at", ""),
+        ),
+    )
+
+
+def update_casino_run(run_id: str, **fields) -> None:
+    if not fields:
+        return
+    _ensure_ready()
+    conn = get_conn()
+    sets = []
+    vals = []
+    for k, v in fields.items():
+        sets.append(f"{k} = ?")
+        vals.append(v)
+    vals.append(run_id)
+    conn.execute(f"UPDATE casino_runs SET {','.join(sets)} WHERE id = ?", vals)
+
+
+def get_casino_run(run_id: str) -> Optional[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM casino_runs WHERE id = ?",
+                       (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_casino_runs(user_id: int = None, limit: int = 100) -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    if user_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM casino_runs WHERE user_id = ? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (int(user_id), int(limit)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM casino_runs ORDER BY started_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def casino_stats(user_id: int) -> dict:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT
+             COUNT(*) AS total,
+             SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+             SUM(CASE WHEN result = 'lose' THEN 1 ELSE 0 END) AS losses,
+             SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes,
+             COALESCE(SUM(profit), 0) AS profit
+           FROM casino_runs WHERE user_id = ?""",
+        (int(user_id),),
+    ).fetchone()
+    if not row:
+        return {"total": 0, "wins": 0, "losses": 0, "pushes": 0, "profit": 0}
+    return {
+        "total": int(row["total"] or 0),
+        "wins": int(row["wins"] or 0),
+        "losses": int(row["losses"] or 0),
+        "pushes": int(row["pushes"] or 0),
+        "profit": int(row["profit"] or 0),
+    }
+
+
+# ===========================================================================
+# Casino logs
+# ===========================================================================
+def add_casino_log(user_id: int, chat_id: int, level: str, message: str,
+                    extra: str = "") -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO casino_logs (user_id, chat_id, level, message, extra, created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (int(user_id), int(chat_id or 0), level,
+         (message or "")[:500], (extra or "")[:500],
+         datetime.now(dt_timezone.utc).isoformat()),
+    )
+
+
+def list_casino_logs(user_id: int = None, limit: int = 100) -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    if user_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM casino_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (int(user_id), int(limit)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM casino_logs ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_casino_logs(user_id: int) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute("DELETE FROM casino_logs WHERE user_id = ?", (int(user_id),))

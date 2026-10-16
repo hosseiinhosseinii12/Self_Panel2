@@ -21,6 +21,8 @@ from . import db
 from . import user_otp as OTP
 from . import text_format as TF
 from . import jobs as J
+from . import casino as CAS
+from .casino_routes import register_casino_user_routes
 from .fonts import NAME_FONTS, DIGIT_FONTS
 
 bp = Blueprint("user", __name__, url_prefix="/user")
@@ -206,7 +208,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   .sidebar { display: none !important; }
 }
 
-/* ---------- Sidebar ---------- */
 .sidebar {
   background: var(--surface);
   border-right: 1px solid var(--border);
@@ -240,7 +241,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   font-size: 14px;
   font-weight: 900;
   transition: transform var(--t-base) var(--ease);
-  box-shadow: 0 4px 12px rgba(10, 10, 10, 0.15);
+  box-shadow: 0 4px 12px rgba(255, 255, 255, 0.08);
 }
 .brand:hover .brand-mark { transform: rotate(-8deg) scale(1.05); }
 
@@ -363,7 +364,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 [data-theme="light"] .theme-toggle .toggle-switch { background: var(--accent); }
 [data-theme="light"] .theme-toggle .toggle-switch::after { transform: translateX(14px); }
 
-/* ---------- Main ---------- */
 .main {
   padding: 32px 32px 80px;
   max-width: 1200px;
@@ -402,7 +402,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   margin-top: 6px;
 }
 
-.page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.page-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 .crumb {
   font-size: 10.5px;
@@ -413,7 +413,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   margin-bottom: 8px;
 }
 
-/* ---------- Buttons ---------- */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -467,7 +466,8 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 .btn-sm { padding: 6px 12px; font-size: 12.5px; border-radius: 7px; }
 
-/* ---------- Forms ---------- */
+.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
 label {
   display: block;
   font-size: 12px;
@@ -501,10 +501,14 @@ input:focus, select:focus, textarea:focus {
 
 input::placeholder, textarea::placeholder { color: var(--text-4); }
 
+input:disabled, select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .field-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
 .field-row > * { flex: 1; min-width: 140px; }
 
-/* ---------- Cards ---------- */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -534,7 +538,6 @@ input::placeholder, textarea::placeholder { color: var(--text-4); }
   margin-left: auto;
 }
 
-/* ---------- Stats ---------- */
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -586,7 +589,6 @@ input::placeholder, textarea::placeholder { color: var(--text-4); }
 
 .stat .v small { font-size: 13px; color: var(--text-3); font-weight: 500; margin-left: 4px; }
 
-/* ---------- Tables ---------- */
 .table-wrap {
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -627,7 +629,6 @@ tbody tr:hover td { background: var(--hover); }
 .text-right { text-align: right; }
 .text-center { text-align: center; }
 
-/* ---------- Badges ---------- */
 .badge {
   display: inline-flex;
   align-items: center;
@@ -655,7 +656,14 @@ tbody tr:hover td { background: var(--hover); }
 .badge.blue { background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }
 .badge.purple { background: var(--purple-bg); color: var(--purple); border-color: var(--purple-border); }
 
-/* ---------- Flash ---------- */
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
 .flash {
   padding: 12px 16px;
   border-radius: var(--r-md);
@@ -678,7 +686,6 @@ tbody tr:hover td { background: var(--hover); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* ---------- Empty ---------- */
 .empty {
   padding: 40px 20px;
   text-align: center;
@@ -688,7 +695,6 @@ tbody tr:hover td { background: var(--hover); }
 
 .empty-icon { font-size: 32px; margin-bottom: 8px; opacity: 0.4; }
 
-/* ---------- Utilities ---------- */
 .mt-2 { margin-top: 8px; }
 .mt-3 { margin-top: 16px; }
 .mt-4 { margin-top: 24px; }
@@ -794,7 +800,6 @@ code {
   font-weight: 600;
 }
 
-/* ---------- OTP INPUT ---------- */
 .otp-input-wrap {
   display: flex;
   justify-content: center;
@@ -892,6 +897,8 @@ code {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
+  width: 100%;
+  justify-content: center;
 }
 
 .otp-timer .dot {
@@ -1003,7 +1010,6 @@ LOGIN_TEMPLATE = r"""
         cells[i + 1].focus();
       }
       if (hidden.value.length === 6) {
-        // auto-submit after slight delay for UX
         setTimeout(() => form.submit(), 150);
       }
     });
@@ -1092,6 +1098,7 @@ DASHBOARD_TEMPLATE = r"""
     <a class="btn" href="{{ url_for('user.appearance_page') }}">Appearance</a>
     <a class="btn" href="{{ url_for('user.textformat_page') }}">Text style</a>
     <a class="btn" href="{{ url_for('user.jobs_page') }}">Jobs</a>
+    <a class="btn" href="{{ url_for('user.casino_page') }}">Casino</a>
   </div>
 </div>
 
@@ -1289,7 +1296,7 @@ TEXTFORMAT_TEMPLATE = r"""
   <p class="muted" style="font-size:13.5px;line-height:1.7">
     When any of the styles above are enabled, the bot <strong>edits</strong>
     each of your outgoing messages right after you send it, wrapping it with
-    the selected Telegram markdown formatting.
+    the selected Telegram HTML formatting.
     <br><br>
     If a chat filter is set, only messages in those chats are affected.
     Leave it empty to apply everywhere.
@@ -1491,9 +1498,15 @@ SIDEBAR = r"""
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
     Text style
   </a>
+
+  <div class="nav-group">Automation</div>
   <a href="{{ url_for('user.jobs_page') }}" class="nav-link {{ 'active' if active=='jobs' else '' }}">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
     Jobs
+  </a>
+  <a href="{{ url_for('user.casino_page') }}" class="nav-link {{ 'active' if active=='casino' else '' }}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+    Casino
   </a>
 
   <div class="sidebar-footer">
@@ -1521,15 +1534,11 @@ def _render_layout(title: str, body: str, active: str = "dashboard"):
         + body
         + '</main></div>'
     )
-    # flash messages need to be rendered, so we call render_template_string once
     return render_template_string(BASE_TEMPLATE, title=title, body=render_template_string(
         full, active=active
     ))
 
 
-# ===========================================================================
-# Auth helpers
-# ===========================================================================
 def _get_uid_or_redirect():
     uid = _current_uid()
     if not uid:
@@ -1600,7 +1609,6 @@ def dashboard():
     return _render_layout("Dashboard", body, "dashboard")
 
 
-# ---------- Clock ----------
 @bp.route("/clock")
 @_login_required
 def clock_page():
@@ -1685,7 +1693,6 @@ def clock_settings():
     return redirect(url_for("user.clock_page"))
 
 
-# ---------- Appearance ----------
 @bp.route("/appearance")
 @_login_required
 def appearance_page():
@@ -1736,7 +1743,6 @@ def appearance_save():
     return redirect(url_for("user.appearance_page"))
 
 
-# ---------- Text format ----------
 @bp.route("/textformat")
 @_login_required
 def textformat_page():
@@ -1767,7 +1773,6 @@ def textformat_save():
     return redirect(url_for("user.textformat_page"))
 
 
-# ---------- Jobs ----------
 @bp.route("/jobs")
 @_login_required
 def jobs_page():
@@ -1791,7 +1796,6 @@ def job_stop(job_id: str):
     return redirect(url_for("user.jobs_page"))
 
 
-# ---------- Account ----------
 @bp.route("/account")
 @_login_required
 def account_page():
@@ -1837,6 +1841,35 @@ def request_subscription():
     create_subscription_request(uid, plan)
     flash(f"⭐ Subscription request ({plan}) sent to admin.")
     return redirect(url_for("user.account_page"))
+
+
+# ===========================================================================
+# Casino routes (register on blueprint)
+# ===========================================================================
+def _render_layout_for_casino(title: str, body: str, active: str = "casino"):
+    full = (
+        '<div class="layout">'
+        + SIDEBAR
+        + '<main class="main">'
+        + body
+        + '</main></div>'
+    )
+    return render_template_string(BASE_TEMPLATE, title=title,
+                                   body=render_template_string(full, active=active))
+
+
+def _get_uid_for_casino():
+    return _current_uid()
+
+
+register_casino_user_routes(
+    bp=bp,
+    login_required=_login_required,
+    csrf_check=_csrf_check,
+    csrf_token=_csrf_token,
+    render_layout=_render_layout_for_casino,
+    get_uid=_get_uid_for_casino,
+)
 
 
 def build_user_app():

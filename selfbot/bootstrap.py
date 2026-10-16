@@ -67,6 +67,7 @@ async def _set_bot_commands(bot) -> None:
         BotCommand(command="logout", description="Log out"),
         BotCommand(command="account", description="Account info"),
         BotCommand(command="web", description="Get OTP for web panel"),
+        BotCommand(command="casino", description="Casino automator"),
     ]
     try:
         await bot(SetBotCommandsRequest(
@@ -308,7 +309,16 @@ async def _boot_async(runtime) -> None:
     except Exception as e:
         log.error(f"handler registration failed: {e}")
 
-    # ---- 9. backup scheduler ----
+    # ---- 9. casino loops ----
+    log.info("starting casino loops…")
+    try:
+        from .casino import start_all_loops
+        await start_all_loops(runtime)
+        log.info("casino loops started")
+    except Exception as e:
+        log.warning(f"casino loops failed: {e}")
+
+    # ---- 10. backup scheduler ----
     try:
         _start_scheduler(runtime)
     except Exception as e:
