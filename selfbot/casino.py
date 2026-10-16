@@ -1,7 +1,10 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
-Uses iter_messages with min_id to find new panel messages after the trigger.
-Also maintains a persistent listener on the user client.
+Uses reply_to_msg_id to find the panel message: when we send "Casino",
+the bot replies to our message with the panel. This is the most reliable
+way to identify the panel.
+
+Also accepts KeyboardInlineButton (Telethon's placeholder) as clickable.
 """
 import asyncio
 import random
@@ -58,6 +61,14 @@ DEFAULT_INTERVAL = 301
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 0.4
 
+# Inline button types we accept as "clickable"
+_INLINE_TYPES = (
+    "KeyboardButtonCallback",
+    "KeyboardInlineButton",
+    "KeyboardButtonUrl",
+    "KeyboardButtonSwitchInline",
+)
+
 
 # ===========================================================================
 # Helpers
@@ -95,18 +106,22 @@ def _match_any(text: str, patterns: list) -> bool:
 
 
 def _msg_has_clickable(msg) -> bool:
+    """Check if a message has at least one inline button.
+    Accepts KeyboardInlineButton (Telethon's placeholder).
+    """
     if not msg or not msg.reply_markup:
         return False
     if not hasattr(msg.reply_markup, "rows"):
         return False
     for row in msg.reply_markup.rows:
         for b in row.buttons:
-            if getattr(b, "data", None):
+            if type(b).__name__ in _INLINE_TYPES:
                 return True
     return False
 
 
 def _find_button(msg, patterns: list):
+    """Find the first inline button whose text matches any pattern."""
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -114,7 +129,7 @@ def _find_button(msg, patterns: list):
         return None
     for row in rm.rows:
         for btn in row.buttons:
-            if not getattr(btn, "data", None):
+            if type(btn).__name__ not in _INLINE_TYPES:
                 continue
             text = _button_text(btn)
             if _match_any(text, patterns):
@@ -127,6 +142,7 @@ def _find_button(msg, patterns: list):
 
 
 def _find_button_by_text(msg, exact_texts: list):
+    """Find inline button whose text equals one of exact_texts."""
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -135,7 +151,7 @@ def _find_button_by_text(msg, exact_texts: list):
     wanted = {t.strip().lower() for t in exact_texts}
     for row in rm.rows:
         for btn in row.buttons:
-            if not getattr(btn, "data", None):
+            if type(btn).__name__ not in _INLINE_TYPES:
                 continue
             if _button_text(btn) in wanted:
                 return btn
@@ -143,6 +159,7 @@ def _find_button_by_text(msg, exact_texts: list):
 
 
 def _find_button_by_position(msg, row: int = 0, col: int = 0):
+    """Find an inline button by row/column position (0-indexed)."""
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
@@ -155,7 +172,7 @@ def _find_button_by_position(msg, row: int = 0, col: int = 0):
     if col >= len(buttons):
         return None
     btn = buttons[col]
-    if not getattr(btn, "data", None):
+    if type(btn).__name__ not in _INLINE_TYPES:
         return None
     return btn
 
@@ -185,29 +202,70 @@ def _log_all_buttons(panel_msg) -> None:
 
 
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
+    """Click an inline button. Multi-method fallback:
+      1) msg.click(data=...) — works for KeyboardButtonCallback
+      2) btn.click() — native button method
+      3) msg.click(text=...) — click by button text
+    """
     if btn is None:
         log_bot.warning("casino: click called with None button")
         return False
     try:
+        btype = type(btn).__name__
+        btext = getattr(btn, "text", "")
         data = getattr(btn, "data", None)
-        if not data:
-            log_bot.warning("casino: button has no data, cannot click")
-            return False
         log_bot.info(
-            f"casino: [click] fetching message for click "
-            f"peer={chat_id} msg={message_id} "
-            f"text={getattr(btn, 'text', '?')!r} data_len={len(data)}"
+            f"casino: [click] button type={btype} text={btext!r} "
+            f"data_len={len(data) if data else 0}"
         )
+
         msg = await client.get_messages(chat_id, ids=message_id)
         if msg is None:
             log_bot.warning("casino: [click] message not found")
             return False
-        result = await msg.click(data=data)
-        log_bot.info(
-            f"casino: [click] OK text={getattr(btn, 'text', '?')!r} "
-            f"result_type={type(result).__name__}"
-        )
-        return True
+
+        # Method 1: msg.click with explicit data
+        if data:
+            try:
+                await msg.click(data=data)
+                log_bot.info("casino: [click] OK via msg.click(data=...)")
+                return True
+            except Exception as e:
+                log_bot.warning(f"casino: [click] data click failed: {type(e).__name__}: {e}")
+
+        # Method 2: native btn.click()
+        if hasattr(btn, "click") and callable(getattr(btn, "click")):
+            try:
+                await btn.click()
+                log_bot.info("casino: [click] OK via btn.click()")
+                return True
+            except Exception as e:
+                log_bot.warning(f"casino: [click] btn.click() failed: {type(e).__name__}: {e}")
+
+        # Method 3: msg.click by text
+        if btext:
+            try:
+                await msg.click(text=btext)
+                log_bot.info("casino: [click] OK via msg.click(text=...)")
+                return True
+            except Exception as e:
+                log_bot.warning(f"casino: [click] text click failed: {type(e).__name__}: {e}")
+
+        # Method 4: raw GetBotCallbackAnswerRequest with data
+        if data:
+            try:
+                await client(GetBotCallbackAnswerRequest(
+                    peer=chat_id,
+                    msg_id=message_id,
+                    data=data,
+                ))
+                log_bot.info("casino: [click] OK via raw GetBotCallbackAnswer")
+                return True
+            except Exception as e:
+                log_bot.warning(f"casino: [click] raw answer failed: {type(e).__name__}: {e}")
+
+        log_bot.error("casino: [click] all methods failed")
+        return False
     except Exception as e:
         log_bot.warning(
             f"casino: [click] FAILED text={getattr(btn, 'text', '?')!r} "
@@ -547,6 +605,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         # ---------- 2. Find panel ----------
         panel_msg = None
 
+        # Strategy A: cached panel id from listener or DB
         if st.last_panel_id:
             log_bot.info(
                 f"casino: [2] checking cached panel id={st.last_panel_id}"
@@ -563,6 +622,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
                 )
                 st.last_panel_id = None
 
+        # Strategy B: retry loop with reply detection
         if panel_msg is None:
             log_bot.info("casino: [2] finding panel message (retry loop)")
             for attempt in range(1, 11):
@@ -599,7 +659,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         log_bot.info(
             f"casino: [3] clicking wheel button "
             f"(text={getattr(btn, 'text', '?')!r} "
-            f"data_len={len(btn.data) if getattr(btn, 'data', None) else 0})"
+            f"data_len={len(getattr(btn, 'data', b'')) or 0})"
         )
         ok = await _click_button(client, chat_id, panel_msg.id, btn)
         log_bot.info(f"casino: [3] click returned {ok}")
@@ -695,32 +755,69 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
     """Find the panel message.
-    Uses iter_messages with min_id to get NEW messages after trigger.
+    Priority:
+      1. Reply to our trigger (sent_msg_id) — MOST RELIABLE
+      2. Cached last_panel_id (checked by caller)
+      3. Newest msg with clickable buttons, newer than trigger
+      4. Broad search of last 200
     """
     st = _get_state_by_chat(chat_id)
     try:
-        log_bot.info(f"casino: [panel] searching messages newer than {sent_msg_id}")
-        found_count = 0
-        async for m in client.iter_messages(chat_id, min_id=sent_msg_id, limit=20):
-            found_count += 1
-            log_bot.info(
-                f"casino: [panel] newer msg id={m.id} "
-                f"sender={getattr(m, 'sender_id', None)} "
-                f"has_markup={bool(m.reply_markup)} "
-                f"text={(m.message or '')[:40]!r}"
-            )
-            if _msg_has_clickable(m):
-                log_bot.info(
-                    f"casino: [panel] FOUND clickable msg id={m.id}"
-                )
-                if st:
-                    st.last_panel_id = m.id
-                return m
+        # Get a chunk of recent messages
+        msgs = await client.get_messages(chat_id, limit=50)
 
+        # ---- Priority 1: reply to our trigger ----
         log_bot.info(
-            f"casino: [panel] no clickable found in {found_count} newer messages"
+            f"casino: [panel] looking for reply to trigger {sent_msg_id}"
         )
+        reply_candidates = []
+        for m in msgs:
+            reply_to = getattr(m, "reply_to_msg_id", None)
+            if reply_to and reply_to == sent_msg_id:
+                reply_candidates.append(m)
 
+        if reply_candidates:
+            log_bot.info(
+                f"casino: [panel] found {len(reply_candidates)} replies "
+                f"to trigger"
+            )
+            for m in reply_candidates:
+                log_bot.info(
+                    f"casino: [panel] reply msg id={m.id} "
+                    f"has_markup={bool(m.reply_markup)} "
+                    f"text={(m.message or '')[:40]!r}"
+                )
+                if _msg_has_clickable(m):
+                    log_bot.info(
+                        f"casino: [panel] FOUND clickable reply id={m.id}"
+                    )
+                    if st:
+                        st.last_panel_id = m.id
+                    return m
+            log_bot.info("casino: [panel] replies found but none clickable")
+
+        # ---- Priority 2: newest clickable newer than trigger ----
+        best = None
+        best_id = 0
+        for m in msgs:
+            if m.id <= sent_msg_id:
+                continue
+            if not _msg_has_clickable(m):
+                continue
+            if m.id > best_id:
+                best = m
+                best_id = m.id
+
+        if best is not None:
+            log_bot.info(
+                f"casino: [panel] found newer clickable msg id={best.id} "
+                f"(trigger={sent_msg_id})"
+            )
+            if st:
+                st.last_panel_id = best.id
+            return best
+
+        # ---- Priority 3: broad search ----
         log_bot.info("casino: [panel] falling back to search last 200")
         found = await _find_latest_panel(client, chat_id)
         if found and st:
@@ -732,9 +829,7 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
 
 
 async def _find_latest_panel(client, chat_id: int):
-    """Find the newest message with a clickable inline button.
-    Logs every message that has a reply_markup.
-    """
+    """Find the newest message with a clickable inline button."""
     try:
         msgs = await client.get_messages(chat_id, limit=200)
         log_bot.info(f"casino: [panel] fetched {len(msgs)} messages")
