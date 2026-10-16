@@ -216,7 +216,7 @@ def _log_all_buttons(panel_msg) -> None:
 
 
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
-    """Click an inline callback button."""
+    """Click an inline callback button using Telethon's native msg.click()."""
     if btn is None:
         log_bot.warning("casino: click called with None button")
         return False
@@ -225,19 +225,22 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
         if not data:
             log_bot.warning("casino: button has no data, cannot click")
             return False
+
         log_bot.info(
-            f"casino: [click] sending GetBotCallbackAnswer "
+            f"casino: [click] fetching message for click "
             f"peer={chat_id} msg={message_id} "
             f"text={btn.text!r} data_len={len(data)}"
         )
-        result = await client(GetBotCallbackAnswerRequest(
-            peer=chat_id,
-            msg_id=message_id,
-            data=data,
-        ))
+
+        msg = await client.get_messages(chat_id, ids=message_id)
+        if msg is None:
+            log_bot.warning("casino: [click] message not found")
+            return False
+
+        result = await msg.click(data=data)
         log_bot.info(
             f"casino: [click] OK text={btn.text!r} "
-            f"response={getattr(result, 'message', '')!r}"
+            f"result_type={type(result).__name__}"
         )
         return True
     except Exception as e:
@@ -405,7 +408,6 @@ async def casino_loop(runtime, user_id: int) -> None:
             await asyncio.sleep(15)
             continue
 
-        # wait until next_run (if set)
         next_run_iso = cfg.get("next_run") or ""
         if next_run_iso:
             try:
@@ -422,7 +424,6 @@ async def casino_loop(runtime, user_id: int) -> None:
             except Exception:
                 pass
 
-        # run one cycle
         try:
             await _run_cycle(runtime, user_id)
         except Exception as e:
@@ -433,13 +434,11 @@ async def casino_loop(runtime, user_id: int) -> None:
             except Exception:
                 pass
 
-        # schedule next run
         cfg = get_config(user_id)
         interval = int(cfg.get("bet_interval") or DEFAULT_INTERVAL)
         next_dt = datetime.now(dt_timezone.utc) + timedelta(seconds=interval)
         save_config(user_id, last_run=_now_iso(), next_run=next_dt.isoformat())
 
-        # short sleep before checking stop_event
         try:
             await asyncio.wait_for(runtime.stop_event.wait(),
                                     timeout=min(interval, 30))
@@ -521,7 +520,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         st.panel_msg_id = panel_msg.id
         log_bot.info(f"casino: [2] panel msg id={panel_msg.id}")
 
-        # DEBUG: log all buttons
         _log_all_buttons(panel_msg)
 
         # ---------- 3. Click "WHEEL OF FORTUNE" ----------
@@ -582,7 +580,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
             await _click_button(client, chat_id, panel_msg.id, btn)
             await asyncio.sleep(2.0)
 
-            # click "1"
             log_bot.info("casino: [6b] looking for '1' button")
             panel_msg = await _get_message(client, chat_id, panel_msg.id)
             _log_all_buttons(panel_msg)
@@ -632,18 +629,28 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 
 async def _find_latest_panel(client, chat_id: int):
-    """Get the latest message from the bot that has an inline keyboard."""
+    """Get the latest message from the bot that has an inline keyboard.
+    Only accepts messages whose buttons we can actually click.
+    """
     try:
         msgs = await client.get_messages(chat_id, limit=15)
         for m in msgs:
-            # must have inline keyboard
-            if m.reply_markup and hasattr(m.reply_markup, "rows"):
-                # must contain at least one callback button
-                for row in m.reply_markup.rows:
-                    for b in row.buttons:
-                        if type(b).__name__ == "KeyboardButtonCallback":
-                            return m
-        log_bot.warning("casino: no panel message with callback buttons found")
+            if not m.reply_markup:
+                continue
+            if not hasattr(m.reply_markup, "rows"):
+                continue
+            for row in m.reply_markup.rows:
+                for b in row.buttons:
+                    if type(b).__name__ != "KeyboardButtonCallback":
+                        continue
+                    data = getattr(b, "data", None)
+                    if data:
+                        log_bot.info(
+                            f"casino: [panel] found msg id={m.id} "
+                            f"with clickable button {b.text!r}"
+                        )
+                        return m
+        log_bot.warning("casino: no panel message with clickable buttons found")
     except Exception as e:
         log_bot.warning(f"casino: find panel failed: {e}")
     return None
