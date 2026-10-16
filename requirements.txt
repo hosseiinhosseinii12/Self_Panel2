@@ -1,0 +1,17 @@
+telethon
+python-socks[asyncio]
+websockets
+PySocks
+flask
+gunicorn
+apscheduler
+backoff
+rich
+requests
+tzdata
+aiosqlite
+pyotp
+qrcode
+pillow
+pytest
+cryptography>=42.0.0
