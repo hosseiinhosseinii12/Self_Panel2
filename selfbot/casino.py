@@ -1,12 +1,14 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
-Uses msg.click(i=index) for clicking buttons because the panel's inline
-buttons are `KeyboardInlineButton` (Telethon placeholder) with no `data`
-and empty `text`. Index-based clicking is the only reliable way.
+Key features:
+  * Click buttons by flat index via msg.click(i=N)
+  * Send the 🎰 emoji as a custom Telegram emoji (with effect) if possible
+  * Debug: dump all message entities to identify custom emoji IDs
+  * Persistent listener for panel detection
 
 Panel button layout (flat index, left-to-right, top-to-bottom):
   [0] = 🍷 MEOWIE GAMBLE
-  [1] = 🎰 WHEEL OF FORTUNE
+  [1] = 🎰 WHEEL OF FORTUNE  ← the target
   [2] = 🎲 DICE
   [3] = 💎 DIAMOND MINE
 """
@@ -30,10 +32,12 @@ try:
         ReplyInlineMarkup,
         KeyboardButtonCallback,
         KeyboardButtonUrl,
+        MessageEntityCustomEmoji,
     )
     HAS_TELETHON = True
 except ImportError:
     HAS_TELETHON = False
+    MessageEntityCustomEmoji = None
 
 
 # ===========================================================================
@@ -121,6 +125,39 @@ def _log_all_buttons(panel_msg, label: str = "") -> None:
         pass
 
 
+def _debug_entities(msg, label: str = "") -> None:
+    """Log all message entities to identify custom emojis."""
+    try:
+        if not msg:
+            log_bot.info(f"casino: [ent{label}] msg is None")
+            return
+        text = msg.message or ""
+        log_bot.info(f"casino: [ent{label}] msg_id={msg.id}")
+        log_bot.info(f"casino: [ent{label}] text={text[:300]!r}")
+        if not msg.entities:
+            log_bot.info(f"casino: [ent{label}] no entities")
+            return
+        for i, ent in enumerate(msg.entities):
+            etype = type(ent).__name__
+            offset = getattr(ent, "offset", None)
+            length = getattr(ent, "length", None)
+            doc_id = getattr(ent, "document_id", None)
+            # extract the emoji char from the text using offset
+            emoji_char = ""
+            try:
+                if text and offset is not None and length is not None:
+                    emoji_char = text[offset:offset + length]
+            except Exception:
+                pass
+            log_bot.info(
+                f"casino: [ent{label}] ent[{i}] "
+                f"type={etype} offset={offset} length={length} "
+                f"document_id={doc_id} emoji={emoji_char!r}"
+            )
+    except Exception as e:
+        log_bot.warning(f"casino: debug entities failed: {e}")
+
+
 def _find_button_with_index(msg, patterns: list):
     """Find a button by text pattern. Returns (button, flat_index)."""
     if not msg or not msg.reply_markup:
@@ -137,7 +174,6 @@ def _find_button_with_index(msg, patterns: list):
             text = _button_text(btn)
             if _match_any(text, patterns):
                 return btn, flat
-            # substring check for non-regex emoji patterns
             for p in patterns:
                 if len(p) <= 3 and p and p in text:
                     return btn, flat
@@ -145,15 +181,38 @@ def _find_button_with_index(msg, patterns: list):
     return None, None
 
 
+def _extract_custom_emoji_from_message(msg) -> Optional[dict]:
+    """Look for a custom emoji in the message and return its ID + offset."""
+    try:
+        if not msg or not msg.entities:
+            return None
+        text = msg.message or ""
+        for ent in msg.entities:
+            etype = type(ent).__name__
+            if etype != "MessageEntityCustomEmoji":
+                continue
+            doc_id = getattr(ent, "document_id", None)
+            if not doc_id:
+                continue
+            offset = getattr(ent, "offset", 0)
+            length = getattr(ent, "length", 0)
+            emoji_char = text[offset:offset + length] if text else ""
+            return {
+                "document_id": doc_id,
+                "offset": offset,
+                "length": length,
+                "emoji": emoji_char,
+            }
+        return None
+    except Exception as e:
+        log_bot.warning(f"casino: extract custom emoji failed: {e}")
+        return None
+
+
 async def _click_button(client, chat_id: int, message_id: int,
                          btn=None, index: Optional[int] = None) -> bool:
     """Click an inline button.
-
-    Priority:
-      1. msg.click(i=index) — by flat button index (best for KeyboardInlineButton)
-      2. msg.click(data=...) — if data exists
-      3. msg.click(text=...) — only if text is non-whitespace
-      4. raw GetBotCallbackAnswerRequest
+    Priority: index → data → text → raw.
     """
     if btn is None and index is None:
         log_bot.warning("casino: click called with no btn and no index")
@@ -171,7 +230,6 @@ async def _click_button(client, chat_id: int, message_id: int,
             log_bot.warning("casino: [click] message not found")
             return False
 
-        # 1. by index (most reliable)
         if index is not None:
             try:
                 await msg.click(i=index)
@@ -180,7 +238,6 @@ async def _click_button(client, chat_id: int, message_id: int,
             except Exception as e:
                 log_bot.warning(f"casino: [click] index failed: {type(e).__name__}: {e}")
 
-        # 2. by data
         if data:
             try:
                 await msg.click(data=data)
@@ -189,7 +246,6 @@ async def _click_button(client, chat_id: int, message_id: int,
             except Exception as e:
                 log_bot.warning(f"casino: [click] data failed: {type(e).__name__}: {e}")
 
-        # 3. by text (only if meaningful)
         if btext and btext.strip():
             try:
                 await msg.click(text=btext)
@@ -198,7 +254,6 @@ async def _click_button(client, chat_id: int, message_id: int,
             except Exception as e:
                 log_bot.warning(f"casino: [click] text failed: {type(e).__name__}: {e}")
 
-        # 4. raw request
         if data:
             try:
                 await client(GetBotCallbackAnswerRequest(
@@ -222,6 +277,38 @@ async def _send_reply(client, chat_id: int, text: str, reply_to: int) -> None:
         log_bot.info(f"casino: replied {text!r} to msg {reply_to}")
     except Exception as e:
         log_bot.warning(f"casino: reply failed: {type(e).__name__}: {e}")
+
+
+async def _send_emoji_with_effect(client, chat_id: int, emoji_char: str,
+                                    custom_doc_id: int, reply_to: int) -> bool:
+    """Send an emoji as a Telegram custom emoji (with effect)."""
+    if MessageEntityCustomEmoji is None:
+        return False
+    try:
+        # length in UTF-16 code units
+        length = len(emoji_char.encode("utf-16-le")) // 2
+        await client.send_message(
+            chat_id,
+            emoji_char,
+            formatting_entities=[
+                MessageEntityCustomEmoji(
+                    offset=0,
+                    length=length,
+                    document_id=int(custom_doc_id),
+                )
+            ],
+            reply_to=reply_to,
+        )
+        log_bot.info(
+            f"casino: sent custom emoji {emoji_char!r} "
+            f"doc_id={custom_doc_id} reply_to={reply_to}"
+        )
+        return True
+    except Exception as e:
+        log_bot.warning(
+            f"casino: send custom emoji failed: {type(e).__name__}: {e}"
+        )
+        return False
 
 
 # ===========================================================================
@@ -347,13 +434,6 @@ def _get_state(user_id: int) -> CasinoState:
         st.user_id = int(user_id)
         _STATES[int(user_id)] = st
     return st
-
-
-def _get_state_by_chat(chat_id: int) -> Optional[CasinoState]:
-    for st in _STATES.values():
-        if st.chat_id == chat_id:
-            return st
-    return None
 
 
 # ===========================================================================
@@ -504,7 +584,8 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
     try:
         # ---------- 1. Send "Casino" ----------
         log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
-        await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        sent = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        sent_id = sent.id
         await asyncio.sleep(3.0)
 
         # ---------- 2. Find panel ----------
@@ -513,19 +594,19 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
             cached = await _get_message(client, chat_id, st.last_panel_id)
             if _msg_has_clickable(cached):
                 panel_msg = cached
-                log_bot.info(f"casino: [2] using cached panel id={cached.id}")
+                log_bot.info(f"casino: [2] cached panel id={cached.id}")
 
         if panel_msg is None:
-            log_bot.info("casino: [2] searching for panel")
+            log_bot.info("casino: [2] searching panel")
             for attempt in range(1, 11):
                 await asyncio.sleep(2.0)
-                # search by reply to our latest message, or last incoming
                 msgs = await client.get_messages(chat_id, limit=30)
                 for m in msgs:
                     if _msg_has_clickable(m):
                         panel_msg = m
                         break
                 if panel_msg is not None:
+                    log_bot.info(f"casino: [2] found on attempt {attempt}")
                     break
 
         if panel_msg is None:
@@ -537,72 +618,90 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         log_bot.info(f"casino: [2] panel id={panel_msg.id}")
         _log_all_buttons(panel_msg, "init")
 
-        # ---------- 3. Click WHEEL OF FORTUNE = index 1 ----------
+        # ---------- 3. Click WHEEL = index 1 ----------
         log_bot.info(f"casino: [3] clicking WHEEL index={WHEEL_INDEX}")
         await _click_button(client, chat_id, panel_msg.id, index=WHEEL_INDEX)
         await asyncio.sleep(3.0)
 
-        # ---------- 4. Click SET ENTRANCE FEE ----------
+        # ---------- 4. SET ENTRANCE FEE ----------
         log_bot.info("casino: [4] clicking SET ENTRANCE FEE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step4")
         btn, idx = _find_button_with_index(panel_msg, [
             r"set\s*entrance\s*fee", r"ꜱᴇᴛ\s*ᴇɴᴛʀᴀɴᴄᴇ", r"entrance\s*fee",
         ])
-        if btn is None:
-            log_bot.info("casino: [4] not matched, trying index=0")
+        if btn is None and idx is None:
+            log_bot.info("casino: [4] not matched, fallback index=0")
             idx = 0
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
-        # ---------- 5. Reply with bet amount ----------
+        # ---------- 5. Reply with bet ----------
         log_bot.info(f"casino: [5] replying with bet {_format_amount(bet)}")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         await _send_reply(client, chat_id, _format_amount(bet), panel_msg.id)
         await asyncio.sleep(3.0)
 
-        # ---------- 6. Click SET NUMBER OF PLAYERS ----------
+        # ---------- 6. SET NUMBER OF PLAYERS ----------
         log_bot.info("casino: [6] clicking SET NUMBER OF PLAYERS")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6")
         btn, idx = _find_button_with_index(panel_msg, [
             r"set\s*number\s*of\s*players", r"ꜱᴇᴛ\s*ɴᴜᴍʙᴇʀ", r"number\s*of\s*players",
         ])
-        if btn is None:
-            log_bot.info("casino: [6] not matched, trying index=0")
+        if btn is None and idx is None:
+            log_bot.info("casino: [6] not matched, fallback index=0")
             idx = 0
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
-        # Then click "1"
+        # click "1"
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6b")
         btn1, idx1 = _find_button_with_index(panel_msg, ["1", "1️⃣", "₁"])
-        if btn1 is None:
+        if btn1 is None and idx1 is None:
             idx1 = 0
         log_bot.info(f"casino: [6b] clicking '1' index={idx1}")
         await _click_button(client, chat_id, panel_msg.id, btn1, index=idx1)
         await asyncio.sleep(2.0)
 
-        # ---------- 7. Click CREATE GAMBLING TABLE ----------
+        # ---------- 7. CREATE GAMBLING TABLE ----------
         log_bot.info("casino: [7] clicking CREATE GAMBLING TABLE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step7")
         btn, idx = _find_button_with_index(panel_msg, [
             r"create\s*gambling\s*table", r"ᴄʀᴇᴀᴛᴇ\s*ɢᴀᴍʙʟɪɴɢ",
         ])
-        if btn is None:
-            log_bot.info("casino: [7] not matched, trying index=0")
+        if btn is None and idx is None:
+            log_bot.info("casino: [7] not matched, fallback index=0")
             idx = 0
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.5)
 
-        # ---------- 8. Reply with 🎰 emoji ----------
+        # ---------- 8. Reply with 🎰 (prefer custom emoji) ----------
         log_bot.info("casino: [8] sending 🎰")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
-        await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
-        # ---------- 9. Poll for result ----------
+        # DEBUG: dump all entities to identify custom emoji IDs
+        _debug_entities(panel_msg, "before-emoji-send")
+
+        custom = _extract_custom_emoji_from_message(panel_msg)
+        if custom and custom.get("document_id"):
+            log_bot.info(
+                f"casino: [8] found custom emoji in panel "
+                f"doc_id={custom['document_id']} emoji={custom['emoji']!r}"
+            )
+            ok = await _send_emoji_with_effect(
+                client, chat_id, "🎰", custom["document_id"], panel_msg.id
+            )
+            if not ok:
+                log_bot.info("casino: [8] custom emoji failed, sending plain")
+                await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
+        else:
+            log_bot.info("casino: [8] no custom emoji, sending plain 🎰")
+            await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
+
+        # ---------- 9. Poll ----------
         log_bot.info("casino: [9] polling for result")
         return await _poll_result(client, chat_id, panel_msg.id)
 
