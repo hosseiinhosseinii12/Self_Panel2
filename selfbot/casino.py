@@ -50,7 +50,7 @@ EMOJI_TRIGGER = "🎰"
 
 DEFAULT_INTERVAL = 301
 GAME_TIMEOUT = 120.0
-POLL_INTERVAL = 0.4
+POLL_INTERVAL = 1.5   # was 0.4 -> too aggressive, risks FloodWait
 
 _INLINE_TYPES = (
     "KeyboardButtonCallback",
@@ -80,12 +80,12 @@ def _now_iso() -> str:
 
 
 def _format_amount(n: int) -> str:
-    if n >= 1_000_000_000:
-        return f"{n // 1_000_000_000}g"
-    if n >= 1_000_000:
-        return f"{n // 1_000_000}m"
-    if n >= 1_000:
-        return f"{n // 1_000}k"
+    """Exact amount for the game bot. Never rounds (2,700,000 -> '2700k',
+    NOT '2m' like the old version did)."""
+    n = int(n)
+    for unit, suffix in ((1_000_000_000, "g"), (1_000_000, "m"), (1_000, "k")):
+        if n >= unit and n % unit == 0:
+            return f"{n // unit}{suffix}"
     return str(n)
 
 
@@ -321,7 +321,11 @@ def save_config(user_id: int, **fields) -> None:
 
 
 def set_enabled(user_id: int, enabled: bool) -> None:
-    save_config(user_id, enabled=1 if enabled else 0)
+    if enabled:
+        # clear next_run so a freshly started automation plays right away
+        save_config(user_id, enabled=1, next_run="")
+    else:
+        save_config(user_id, enabled=0)
 
 
 def set_chat(user_id: int, chat_id: int) -> None:
@@ -361,10 +365,15 @@ def reset_progress(user_id: int) -> None:
 # ===========================================================================
 def compute_next_bet(current_bet: int, result: str,
                       initial_bet: int = START_BET,
-                      max_allowed: int = MAX_BET) -> int:
+                      max_allowed: int = MAX_BET,
+                      strategy: str = "martingale") -> int:
+    max_allowed = min(int(max_allowed or MAX_BET), MAX_BET)
+
     if result == "win":
         nxt = initial_bet
-    elif result == "push":
+    elif result in ("push", "timeout"):
+        nxt = current_bet
+    elif strategy == "flat":
         nxt = current_bet
     else:
         nxt = current_bet * LOSS_MULTIPLIER
@@ -405,6 +414,7 @@ class CasinoState:
         self.last_panel_id: Optional[int] = None
         self.bet_amount: int = 0
         self.lock = asyncio.Lock()
+        self.cycle_lock = asyncio.Lock()   # one round at a time per user
         self.listener_installed: bool = False
 
 
@@ -476,50 +486,63 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
 async def casino_loop(runtime, user_id: int) -> None:
     log_bot.info(f"casino: loop started uid={user_id}")
     while not runtime.stop_event.is_set():
-        cfg = get_config(user_id)
-        if not cfg["enabled"] or not cfg["chat_id"]:
-            await asyncio.sleep(15)
-            continue
+        try:
+            cfg = get_config(user_id)
+            if not cfg["enabled"] or not cfg["chat_id"]:
+                await asyncio.sleep(15)
+                continue
 
-        next_run_iso = cfg.get("next_run") or ""
-        if next_run_iso:
+            next_run_iso = cfg.get("next_run") or ""
+            if next_run_iso:
+                try:
+                    next_dt = datetime.fromisoformat(next_run_iso)
+                    wait = (next_dt - datetime.now(dt_timezone.utc)).total_seconds()
+                    if wait > 0:
+                        try:
+                            await asyncio.wait_for(runtime.stop_event.wait(),
+                                                    timeout=min(wait, 20))
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                except ValueError:
+                    pass
+
             try:
-                next_dt = datetime.fromisoformat(next_run_iso)
-                wait = (next_dt - datetime.now(dt_timezone.utc)).total_seconds()
-                if wait > 0:
-                    try:
-                        await asyncio.wait_for(runtime.stop_event.wait(),
-                                                timeout=min(wait, 60))
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
-            except Exception:
-                pass
+                await _run_cycle(runtime, user_id)
+            except Exception as e:
+                log_bot.exception(f"casino: cycle failed uid={user_id}: {e}")
 
-        try:
-            await _run_cycle(runtime, user_id)
+            _schedule_next(user_id)
         except Exception as e:
-            log_bot.exception(f"casino: cycle failed uid={user_id}: {e}")
+            # never let the loop die
+            log_bot.exception(f"casino: loop error uid={user_id}: {e}")
+            await asyncio.sleep(15)
 
-        cfg = get_config(user_id)
-        interval = int(cfg.get("bet_interval") or DEFAULT_INTERVAL)
-        next_dt = datetime.now(dt_timezone.utc) + timedelta(seconds=interval)
-        save_config(user_id, last_run=_now_iso(), next_run=next_dt.isoformat())
 
-        try:
-            await asyncio.wait_for(runtime.stop_event.wait(),
-                                    timeout=min(interval, 30))
-        except asyncio.TimeoutError:
-            pass
+def _schedule_next(user_id: int) -> None:
+    cfg = get_config(user_id)
+    interval = int(cfg.get("bet_interval") or DEFAULT_INTERVAL)
+    next_dt = datetime.now(dt_timezone.utc) + timedelta(seconds=interval)
+    save_config(user_id, last_run=_now_iso(), next_run=next_dt.isoformat())
 
 
 # ===========================================================================
 # Cycle
 # ===========================================================================
 async def _run_cycle(runtime, user_id: int) -> None:
+    st = _get_state(user_id)
+    if st.cycle_lock.locked():
+        log_bot.info(f"casino: round already running uid={user_id}, skipping")
+        return
+    async with st.cycle_lock:
+        await _run_cycle_locked(runtime, user_id, st)
+
+
+async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     cfg = get_config(user_id)
     chat_id = cfg["chat_id"]
-    bet = int(cfg["current_bet"])
+    cap = min(int(cfg["max_allowed_bet"] or MAX_BET), MAX_BET)
+    bet = min(int(cfg["current_bet"]), cap)
     client = runtime.user_clients.get(int(user_id))
     if client is None:
         db.add_casino_log(user_id, chat_id, "error", "user client not connected")
@@ -530,7 +553,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
     except Exception:
         pass
 
-    st = _get_state(user_id)
     async with st.lock:
         st.chat_id = chat_id
         st.bet_amount = bet
@@ -545,43 +567,59 @@ async def _run_cycle(runtime, user_id: int) -> None:
     })
 
     try:
-        result = await _play_round(runtime, client, user_id, chat_id, bet, st)
-        await _finalize_run(user_id, chat_id, bet, result)
-    except asyncio.TimeoutError as e:
+        parsed = await _play_round(runtime, client, user_id, chat_id, bet, st)
+        if parsed is None:
+            # No result seen: do NOT count as a loss and do NOT touch the bet
+            db.update_casino_run(st.run_id, status="timeout",
+                                  error="no result message",
+                                  finished_at=_now_iso())
+            db.add_casino_log(user_id, chat_id, "warn",
+                              f"no result for bet={_format_amount(bet)} "
+                              f"(bet unchanged)")
+            return
+        await _finalize_run(user_id, chat_id, bet, parsed)
+    except (asyncio.TimeoutError, TimeoutError) as e:
         db.update_casino_run(st.run_id, status="timeout", error=str(e),
                               finished_at=_now_iso())
+        db.add_casino_log(user_id, chat_id, "warn", f"timeout: {e}")
     except Exception as e:
         db.update_casino_run(st.run_id, status="error",
                               error=f"{type(e).__name__}: {e}",
                               finished_at=_now_iso())
+        db.add_casino_log(user_id, chat_id, "error",
+                          f"{type(e).__name__}: {e}")
         log_bot.error(f"casino: cycle exception:\n{traceback.format_exc()}")
 
 
 async def _play_round(runtime, client, user_id: int, chat_id: int,
-                       bet: int, st: CasinoState) -> str:
+                       bet: int, st: CasinoState) -> Optional[dict]:
     try:
         # 1. Send "Casino"
         log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
-        await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        sent_msg = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        base_id = int(getattr(sent_msg, "id", 0) or 0)
         await asyncio.sleep(3.0)
 
-        # 2. Find panel
+        # 2. Find the FRESH panel (a message newer than the one we just sent).
+        #    The old code reused the cached panel from the previous round,
+        #    which is stale after the first game.
         panel_msg = None
-        if st.last_panel_id:
+        for attempt in range(1, 11):
+            msgs = await client.get_messages(chat_id, limit=30)
+            for m in msgs:  # newest first
+                if m.id > base_id and not m.out and _msg_has_clickable(m):
+                    panel_msg = m
+                    break
+            if panel_msg is not None:
+                break
+            await asyncio.sleep(2.0)
+
+        # Fallback: the bot may have EDITED an existing panel instead
+        if panel_msg is None and st.last_panel_id:
             cached = await _get_message(client, chat_id, st.last_panel_id)
             if _msg_has_clickable(cached):
+                log_bot.warning("casino: [2] no new panel, using cached one")
                 panel_msg = cached
-
-        if panel_msg is None:
-            for attempt in range(1, 11):
-                await asyncio.sleep(2.0)
-                msgs = await client.get_messages(chat_id, limit=30)
-                for m in msgs:
-                    if _msg_has_clickable(m):
-                        panel_msg = m
-                        break
-                if panel_msg is not None:
-                    break
 
         if panel_msg is None:
             raise TimeoutError("panel not found")
@@ -669,7 +707,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
         # 9. Poll for result
         log_bot.info("casino: [9] polling for result")
-        return await _poll_result(client, chat_id, panel_msg.id)
+        return await _poll_result(client, chat_id, panel_msg.id, base_id)
 
     except Exception as e:
         log_bot.error(
@@ -686,23 +724,43 @@ async def _get_message(client, chat_id: int, msg_id: int):
         return None
 
 
-async def _poll_result(client, chat_id: int, msg_id: int) -> str:
-    last_text = ""
+async def _poll_result(client, chat_id: int, panel_id: int,
+                       after_id: int) -> Optional[dict]:
+    """Wait for 'Score: N | ...' either in the panel (edited) or in a new
+    incoming message after our 'Casino' message. Returns the parsed dict or
+    None on timeout."""
+    seen = set()
+    # ignore whatever text the panel already shows before the spin
+    pre = await _get_message(client, chat_id, panel_id)
+    if pre is not None:
+        seen.add((pre.id, pre.message or ""))
+
     deadline = time.time() + GAME_TIMEOUT
     while time.time() < deadline:
         await asyncio.sleep(POLL_INTERVAL)
-        msg = await _get_message(client, chat_id, msg_id)
-        if msg is None:
-            continue
-        text = msg.message or ""
-        if not text or text == last_text:
-            continue
-        last_text = text
-        result = _parse_result(text)
-        if result is not None:
-            log_bot.info(f"casino: result parsed {result}")
-            return result["result"]
-    return "timeout"
+
+        candidates = []
+        msg = await _get_message(client, chat_id, panel_id)
+        if msg is not None:
+            candidates.append(msg)
+        try:
+            recent = await client.get_messages(chat_id, limit=10,
+                                                min_id=after_id)
+            candidates.extend(m for m in recent if m and not m.out)
+        except Exception:
+            pass
+
+        for m in candidates:
+            text = m.message or ""
+            key = (m.id, text)
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            parsed = _parse_result(text)
+            if parsed is not None:
+                log_bot.info(f"casino: result parsed {parsed} (msg {m.id})")
+                return parsed
+    return None
 
 
 def _parse_result(text: str) -> Optional[dict]:
@@ -713,14 +771,29 @@ def _parse_result(text: str) -> Optional[dict]:
     if not m:
         return None
     score = int(m.group(1))
+    rest = m.group(2)
+
+    mult = None
+    mm = (re.search(r"(\d+(?:\.\d+)?)\s*x\b", rest)
+          or re.search(r"\bx\s*(\d+(?:\.\d+)?)", rest)
+          or re.search(r"(\d+(?:\.\d+)?)\s*×", rest))
+    if mm:
+        try:
+            mult = float(mm.group(1))
+        except ValueError:
+            mult = None
+
     if score == 0:
-        return {"result": "lose", "score": score}
-    if score > 0:
-        return {"result": "win", "score": score}
-    return {"result": "push", "score": score}
+        result = "lose"
+    else:
+        result = "win"
+    return {"result": result, "score": score, "multiplier": mult}
 
 
-async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> None:
+async def _finalize_run(user_id: int, chat_id: int, bet: int,
+                         parsed: dict) -> None:
+    result = parsed["result"]
+    score = int(parsed.get("score") or 0)
     cfg = get_config(user_id)
     st = _get_state(user_id)
     initial = int(cfg["initial_bet"])
@@ -729,7 +802,8 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
     mults = _parse_multipliers(cfg)
 
     if result == "win":
-        mult = random.choice(mults) if mults else 2.0
+        # real multiplier from the bot's message if present, else configured
+        mult = parsed.get("multiplier") or (random.choice(mults) if mults else 2.0)
     elif result == "push":
         mult = 1.0
     else:
@@ -749,7 +823,8 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
         won_amount = 0
         lost_amount = bet
 
-    next_bet = compute_next_bet(bet, result, initial, max_allowed)
+    next_bet = compute_next_bet(bet, result, initial, max_allowed,
+                                cfg.get("strategy_mode", "martingale"))
 
     if result == "win":
         new_streak = int(cfg["current_streak"]) + 1
@@ -770,7 +845,7 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
         st.run_id,
         multiplier=float(mult),
         result=result,
-        score=0,
+        score=score,
         profit=int(profit),
         status="finished",
         finished_at=_now_iso(),
@@ -790,7 +865,7 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
         peak_bet=peak_bet,
         peak_balance=peak_balance,
         last_multiplier=float(mult),
-        last_score=0,
+        last_score=score,
         last_result=result,
         current_streak=new_streak,
         best_streak=best_streak,
@@ -814,29 +889,52 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
 # ===========================================================================
 # Manager
 # ===========================================================================
-async def start_all_loops(runtime) -> None:
-    for cfg_row in db.list_casino_enabled():
-        uid = int(cfg_row["user_id"])
-        asyncio.create_task(casino_loop(runtime, uid))
-        log_bot.info(f"casino: spawned loop uid={uid}")
+_LOOPS: dict = {}   # user_id -> asyncio.Task  (one loop per user, always)
 
 
 async def ensure_loop(runtime, user_id: int) -> None:
-    st = _STATES.get(int(user_id))
-    if st is None:
-        asyncio.create_task(casino_loop(runtime, user_id))
+    """Start the user's loop unless one is already alive.
+
+    The old version checked _STATES, which is only created lazily, so
+    start_all_loops + toggle could spawn duplicate loops (double bets).
+    """
+    uid = int(user_id)
+    task = _LOOPS.get(uid)
+    if task is not None and not task.done():
+        return
+    _LOOPS[uid] = asyncio.create_task(casino_loop(runtime, uid))
+    log_bot.info(f"casino: spawned loop uid={uid}")
+
+
+async def start_all_loops(runtime) -> None:
+    for cfg_row in db.list_casino_enabled():
+        await ensure_loop(runtime, int(cfg_row["user_id"]))
+
+
+async def _manual_run(runtime, user_id: int) -> None:
+    try:
+        await _run_cycle(runtime, user_id)
+    except Exception as e:
+        log_bot.exception(f"casino: manual run failed uid={user_id}: {e}")
+    finally:
+        # restart the interval countdown so the loop doesn't fire right after
+        try:
+            _schedule_next(user_id)
+        except Exception:
+            pass
 
 
 async def trigger_now(runtime, user_id: int) -> dict:
+    """Start one round in the background and return immediately
+    (a round takes minutes; the web request must not wait for it)."""
     cfg = get_config(user_id)
     if not cfg["chat_id"]:
         return {"ok": False, "error": "no chat_id"}
     client = runtime.user_clients.get(int(user_id))
     if client is None:
         return {"ok": False, "error": "user client not connected"}
-    save_config(user_id, next_run="")
-    try:
-        await _run_cycle(runtime, user_id)
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    st = _get_state(user_id)
+    if st.cycle_lock.locked():
+        return {"ok": False, "error": "a round is already running"}
+    asyncio.create_task(_manual_run(runtime, user_id))
+    return {"ok": True}

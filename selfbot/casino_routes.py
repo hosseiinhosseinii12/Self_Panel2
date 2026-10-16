@@ -75,17 +75,30 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
 
         mults = (request.form.get("multipliers") or "1.5,2,2.5,3").strip()
         strategy = request.form.get("strategy_mode", "martingale")
+        if strategy not in ("martingale", "flat"):
+            strategy = "martingale"
 
-        CAS.save_config(
-            uid,
+        old_cfg = CAS.get_config(uid)
+        fields = dict(
             chat_id=chat_id,
             initial_bet=initial,
-            current_bet=initial,
             max_bet=max_bet,
+            # the strategy engine reads max_allowed_bet; the game itself
+            # rejects anything above CAS.MAX_BET
+            max_allowed_bet=min(max_bet, CAS.MAX_BET),
             bet_interval=interval,
             multipliers=mults,
             strategy_mode=strategy,
         )
+        # only restart the martingale when the base bet actually changed
+        # (saving the form used to reset progress every single time)
+        if initial != old_cfg["initial_bet"]:
+            fields["current_bet"] = initial
+            fields["peak_bet"] = initial
+        # a different chat means the cached panel message is invalid
+        if chat_id != old_cfg["chat_id"]:
+            fields["panel_msg_id"] = 0
+        CAS.save_config(uid, **fields)
         audit_record(current_admin_id(), "casino_save", target=str(uid),
                      ip=request.remote_addr,
                      admin_name=current_admin_name(),
@@ -235,7 +248,9 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
             initial = max(1, initial)
         except ValueError:
             initial = cfg["initial_bet"]
-        CAS.save_config(uid, initial_bet=initial, current_bet=initial)
+        if initial != cfg["initial_bet"]:
+            CAS.save_config(uid, initial_bet=initial, current_bet=initial,
+                            peak_bet=initial)
 
         # interval
         try:
