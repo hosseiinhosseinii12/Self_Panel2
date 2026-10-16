@@ -3,7 +3,7 @@
 Runs on the USER client (self-bot). Every N seconds (default 301s = 5m 1s)
 after the previous game ends, it:
   1. Sends the literal text "Casino" to the configured chat
-  2. Waits for the bot's panel message
+  2. Waits for the bot's panel message (with retry)
   3. Clicks the "WHEEL OF FORTUNE" inline button
   4. Confirms the click (edits happen on the same message)
   5. Sets entrance fee (replies with the current bet amount)
@@ -146,7 +146,6 @@ def _find_button(msg, patterns: list):
             text = _button_text(btn)
             if _match_any(text, patterns):
                 return btn
-            # also match emoji-only patterns
             for p in patterns:
                 if len(p) <= 2 and p and ord(p[0]) > 0x2000:
                     if p in text:
@@ -509,14 +508,23 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         log_bot.info(f"casino: [1] sending '{CASINO_TRIGGER_TEXT}' uid={user_id}")
         await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
         log_bot.info("casino: [1] sent OK")
-        await asyncio.sleep(4.0)
 
-        # ---------- 2. Find the panel message ----------
-        log_bot.info("casino: [2] finding panel message")
-        panel_msg = await _find_latest_panel(client, chat_id)
+        # ---------- 2. Find panel with retry (up to 7 attempts = 14s) ----------
+        log_bot.info("casino: [2] finding panel message (retry loop)")
+        panel_msg = None
+        for attempt in range(1, 8):
+            await asyncio.sleep(2.0)
+            log_bot.info(f"casino: [2] attempt {attempt}/7")
+            panel_msg = await _find_latest_panel(client, chat_id)
+            if panel_msg is not None:
+                log_bot.info(f"casino: [2] found panel on attempt {attempt}")
+                break
+            log_bot.info(f"casino: [2] attempt {attempt} - not found yet")
+
         if panel_msg is None:
-            log_bot.error("casino: [2] FAILED - panel not found")
+            log_bot.error("casino: [2] FAILED - panel not found after 7 attempts")
             raise TimeoutError("casino panel not found after trigger")
+
         st.panel_msg_id = panel_msg.id
         log_bot.info(f"casino: [2] panel msg id={panel_msg.id}")
 
@@ -629,31 +637,56 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 
 async def _find_latest_panel(client, chat_id: int):
-    """Get the latest message from the bot that has an inline keyboard.
-    Only accepts messages whose buttons we can actually click.
+    """Find the panel message sent by Meowie Casino.
+    Handles in-place edits and delayed responses.
+    Picks the newest message that has clickable callback buttons.
     """
     try:
-        msgs = await client.get_messages(chat_id, limit=15)
+        msgs = await client.get_messages(chat_id, limit=50)
+        log_bot.info(f"casino: [panel] fetched {len(msgs)} messages")
+
+        best = None
+        best_id = 0
         for m in msgs:
             if not m.reply_markup:
                 continue
             if not hasattr(m.reply_markup, "rows"):
                 continue
+
+            has_cb = False
             for row in m.reply_markup.rows:
                 for b in row.buttons:
                     if type(b).__name__ != "KeyboardButtonCallback":
                         continue
-                    data = getattr(b, "data", None)
-                    if data:
-                        log_bot.info(
-                            f"casino: [panel] found msg id={m.id} "
-                            f"with clickable button {b.text!r}"
-                        )
-                        return m
-        log_bot.warning("casino: no panel message with clickable buttons found")
+                    if getattr(b, "data", None):
+                        has_cb = True
+                        break
+                if has_cb:
+                    break
+            if not has_cb:
+                continue
+
+            if m.id > best_id:
+                best = m
+                best_id = m.id
+
+        if best is None:
+            log_bot.warning("casino: [panel] no clickable panel found")
+            return None
+
+        log_bot.info(f"casino: [panel] selected msg id={best.id}")
+        for i, row in enumerate(best.reply_markup.rows):
+            for j, b in enumerate(row.buttons):
+                text = getattr(b, "text", "?")
+                data = getattr(b, "data", b"")
+                log_bot.info(
+                    f"casino: [panel] button [{i}][{j}] "
+                    f"text={text!r} data_len={len(data) if data else 0}"
+                )
+        return best
     except Exception as e:
-        log_bot.warning(f"casino: find panel failed: {e}")
-    return None
+        log_bot.warning(f"casino: [panel] failed: {type(e).__name__}: {e}")
+        return None
 
 
 async def _get_message(client, chat_id: int, msg_id: int):
