@@ -173,6 +173,11 @@ async def _load_user_sessions(runtime) -> None:
             if await client.is_user_authorized():
                 runtime.user_clients[uid] = client
                 log_bot.info(f"loaded session uid={uid}")
+                try:
+                    from .bot_handlers import _register_user_client_format_hooks
+                    _register_user_client_format_hooks(runtime, uid, client)
+                except Exception as e:
+                    log_bot.warning(f"format hook install failed uid={uid}: {e}")
                 u = rows.get(str(uid)) or {}
                 if u.get("clock_on"):
                     try:

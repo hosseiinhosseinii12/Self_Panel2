@@ -193,7 +193,7 @@ async def start_qr_login(runtime, user_id: int = None) -> tuple:
                 pass
         return False, "Failed to render QR PNG.", b"", 0
 
-    # store per-user QR client in dict (not global)
+    # store per-user QR client in dict
     runtime._qr_clients = getattr(runtime, "_qr_clients", {})
     if uid is not None:
         runtime._qr_clients[uid] = client
@@ -234,6 +234,11 @@ async def _wait_native(runtime, qr_obj, user_id: int = None) -> None:
 
     if user_id:
         runtime.user_clients[int(user_id)] = client
+        try:
+            from .bot_handlers import _register_user_client_format_hooks
+            _register_user_client_format_hooks(runtime, int(user_id), client)
+        except Exception as e:
+            log_bot.warning(f"could not install format hook after qr: {e}")
     _clear_qr_state(uid)
     log_bot.info(f"qr: login succeeded for uid={uid}")
 
@@ -275,6 +280,11 @@ async def finish_qr_2fa(runtime, user_id: int, password: str) -> tuple:
     runtime.user_clients[uid] = client
     runtime._qr_needs_2fa = False
     _clear_qr_state(uid)
+    try:
+        from .bot_handlers import _register_user_client_format_hooks
+        _register_user_client_format_hooks(runtime, uid, client)
+    except Exception as e:
+        log_bot.warning(f"could not install format hook after qr 2fa: {e}")
 
     # persist session string
     try:

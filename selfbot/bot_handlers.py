@@ -1,7 +1,7 @@
 """Telegram bot runtime — login-first with QR, per-user, group-first jobs.
 
 Includes: text-format auto-edit hook (bold/italic/underline/strike/spoiler)
-and OTP generation for the user web panel.
+attached to USER clients (self-bot), not the bot client.
 """
 import asyncio
 import io
@@ -385,7 +385,7 @@ def _register_handlers(rt: BotRuntime) -> None:
         await event.respond(P.account_text(uid), buttons=P.account_buttons())
 
     # ---------------------------------------------------------------------
-    # /web — issue OTP
+    # /web — issue OTP for user panel
     # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/web$", incoming=True))
     @_guarded(rt)
@@ -481,30 +481,6 @@ def _register_handlers(rt: BotRuntime) -> None:
             pass
         except Exception as e:
             log_bot.warning(f"callback error data={data}: {type(e).__name__}: {e}")
-
-    # ---------------------------------------------------------------------
-    # Outgoing text-format hook
-    # ---------------------------------------------------------------------
-    @bot.on(events.NewMessage(outgoing=True))
-    async def _outgoing_format(event):
-        """Auto-edit outgoing messages with the enabled text styles."""
-        try:
-            if not (event.is_private or event.is_group):
-                return
-            uid = event.sender_id or 0
-            if not uid:
-                return
-            chat_id = event.chat_id
-            if chat_id is None:
-                return
-            text = event.raw_text or ""
-            if not text.strip():
-                return
-            if text.startswith(("/", ".")):
-                return
-            await TF.handle_own_message(rt, uid, chat_id, event.id, text)
-        except Exception as e:
-            log_bot.debug(f"outgoing format hook: {type(e).__name__}: {e}")
 
     # ---------------------------------------------------------------------
     # Text handler (private messages)
@@ -804,6 +780,43 @@ def _register_handlers(rt: BotRuntime) -> None:
             return
 
 
+def _register_user_client_format_hooks(rt: BotRuntime, user_id: int, client):
+    """Attach the text-format hook to a user (self-bot) client.
+
+    Outgoing messages from the user come through the USER client, not the
+    bot client. So we hook `outgoing=True` on each user client after it
+    connects / logs in.
+    """
+    if client is None:
+        return
+    if getattr(client, "_format_hook_installed", False):
+        return
+
+    @client.on(events.NewMessage(outgoing=True))
+    async def _user_outgoing_format(event):
+        try:
+            chat_id = event.chat_id
+            if chat_id is None:
+                return
+            text = event.raw_text or ""
+            if not text.strip():
+                return
+            if text.startswith(("/", ".")):
+                return
+            log_bot.info(
+                f"user outgoing: uid={user_id} chat={chat_id} "
+                f"msg={event.id} text={text[:40]!r}"
+            )
+            await TF.handle_own_message(rt, user_id, chat_id, event.id, text)
+        except Exception as e:
+            log_bot.warning(
+                f"user client format hook error: {type(e).__name__}: {e}"
+            )
+
+    client._format_hook_installed = True
+    log_bot.info(f"format hook installed on user client uid={user_id}")
+
+
 async def _finish_login(rt: BotRuntime, uid: int, event, st: dict) -> None:
     st["step"] = "idle"
     st["phone"] = None
@@ -822,6 +835,10 @@ async def _finish_login(rt: BotRuntime, uid: int, event, st: dict) -> None:
         client = rt.user_clients.get(uid)
         if client:
             save_from_client(uid, client)
+            try:
+                _register_user_client_format_hooks(rt, uid, client)
+            except Exception as e:
+                log_bot.warning(f"could not install format hook after login: {e}")
     except Exception as e:
         log_bot.warning(f"could not persist session string: {e}")
 
