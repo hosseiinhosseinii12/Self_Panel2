@@ -132,16 +132,17 @@ def _match_any(text: str, patterns: list) -> bool:
 
 def _find_button(msg, patterns: list):
     """Find the first inline button whose text matches any pattern.
-    Also handles buttons whose text is emoji-only.
+    Also handles buttons whose text is emoji-only, and buttons
+    represented as `KeyboardInlineButton` (Telegram's placeholder).
     """
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
-    if not isinstance(rm, ReplyInlineMarkup):
+    if not hasattr(rm, "rows"):
         return None
     for row in rm.rows:
         for btn in row.buttons:
-            if not isinstance(btn, KeyboardButtonCallback):
+            if not getattr(btn, "data", None):
                 continue
             text = _button_text(btn)
             if _match_any(text, patterns):
@@ -158,12 +159,12 @@ def _find_button_by_text(msg, exact_texts: list):
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
-    if not isinstance(rm, ReplyInlineMarkup):
+    if not hasattr(rm, "rows"):
         return None
     wanted = {t.strip().lower() for t in exact_texts}
     for row in rm.rows:
         for btn in row.buttons:
-            if not isinstance(btn, KeyboardButtonCallback):
+            if not getattr(btn, "data", None):
                 continue
             if _button_text(btn) in wanted:
                 return btn
@@ -175,7 +176,7 @@ def _find_button_by_position(msg, row: int = 0, col: int = 0):
     if not msg or not msg.reply_markup:
         return None
     rm = msg.reply_markup
-    if not isinstance(rm, ReplyInlineMarkup):
+    if not hasattr(rm, "rows"):
         return None
     rows = rm.rows
     if row >= len(rows):
@@ -184,7 +185,7 @@ def _find_button_by_position(msg, row: int = 0, col: int = 0):
     if col >= len(buttons):
         return None
     btn = buttons[col]
-    if not isinstance(btn, KeyboardButtonCallback):
+    if not getattr(btn, "data", None):
         return None
     return btn
 
@@ -220,7 +221,7 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
         log_bot.warning("casino: click called with None button")
         return False
     try:
-        data = btn.data
+        data = getattr(btn, "data", None)
         if not data:
             log_bot.warning("casino: button has no data, cannot click")
             return False
@@ -228,7 +229,7 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
         log_bot.info(
             f"casino: [click] fetching message for click "
             f"peer={chat_id} msg={message_id} "
-            f"text={btn.text!r} data_len={len(data)}"
+            f"text={getattr(btn, 'text', '?')!r} data_len={len(data)}"
         )
 
         msg = await client.get_messages(chat_id, ids=message_id)
@@ -238,7 +239,7 @@ async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
 
         result = await msg.click(data=data)
         log_bot.info(
-            f"casino: [click] OK text={btn.text!r} "
+            f"casino: [click] OK text={getattr(btn, 'text', '?')!r} "
             f"result_type={type(result).__name__}"
         )
         return True
@@ -542,7 +543,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         log_bot.info(
             f"casino: [3] clicking wheel button "
             f"(text={getattr(btn, 'text', '?')!r} "
-            f"data_len={len(btn.data) if btn.data else 0})"
+            f"data_len={len(btn.data) if getattr(btn, 'data', None) else 0})"
         )
         ok = await _click_button(client, chat_id, panel_msg.id, btn)
         log_bot.info(f"casino: [3] click returned {ok}")
@@ -639,37 +640,15 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 async def _find_latest_panel(client, chat_id: int):
     """Find the panel message sent by Meowie Casino.
     Handles in-place edits and delayed responses.
-    Picks the newest message that has clickable callback buttons.
+    Accepts any inline button that has `data` (regardless of type name).
     """
     try:
         msgs = await client.get_messages(chat_id, limit=50)
         log_bot.info(f"casino: [panel] fetched {len(msgs)} messages")
 
-        # ====== DEBUG: log first 15 messages ======
-        for idx, m in enumerate(msgs[:15]):
-            try:
-                sender_id = getattr(m, "sender_id", None)
-                text_preview = (m.message or "")[:50].replace("\n", " ")
-                has_markup = bool(m.reply_markup)
-                markup_type = type(m.reply_markup).__name__ if m.reply_markup else "None"
-                button_info = ""
-                if m.reply_markup and hasattr(m.reply_markup, "rows"):
-                    for row in m.reply_markup.rows:
-                        for b in row.buttons:
-                            btype = type(b).__name__
-                            btext = getattr(b, "text", "")
-                            button_info += f"[{btype}:{btext[:15]}]"
-                log_bot.info(
-                    f"casino: [panel] msg[{idx}] id={m.id} "
-                    f"sender={sender_id} markup={markup_type} "
-                    f"buttons={button_info} text={text_preview!r}"
-                )
-            except Exception as ee:
-                log_bot.warning(f"casino: [panel] debug msg[{idx}] failed: {ee}")
-        # ====== END DEBUG ======
-
         best = None
         best_id = 0
+
         for m in msgs:
             if not m.reply_markup:
                 continue
@@ -679,13 +658,13 @@ async def _find_latest_panel(client, chat_id: int):
             has_cb = False
             for row in m.reply_markup.rows:
                 for b in row.buttons:
-                    if type(b).__name__ != "KeyboardButtonCallback":
-                        continue
-                    if getattr(b, "data", None):
+                    data = getattr(b, "data", None)
+                    if data:
                         has_cb = True
                         break
                 if has_cb:
                     break
+
             if not has_cb:
                 continue
 
@@ -702,9 +681,11 @@ async def _find_latest_panel(client, chat_id: int):
             for j, b in enumerate(row.buttons):
                 text = getattr(b, "text", "?")
                 data = getattr(b, "data", b"")
+                tname = type(b).__name__
                 log_bot.info(
                     f"casino: [panel] button [{i}][{j}] "
-                    f"text={text!r} data_len={len(data) if data else 0}"
+                    f"text={text!r} type={tname} "
+                    f"data_len={len(data) if data else 0}"
                 )
         return best
     except Exception as e:
