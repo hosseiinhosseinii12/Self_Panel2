@@ -1,7 +1,7 @@
 """Text formatting engine — bold/italic/underline/strike/spoiler auto-edit.
 
 When enabled, every outgoing message from the user gets re-edited with the
-selected Telegram markdown/HTML formatting.
+selected Telegram HTML formatting.
 """
 import asyncio
 from typing import Optional
@@ -10,12 +10,13 @@ from .logging_setup import log_bot
 from . import db
 
 
+# All formats use Telegram HTML tags (works reliably with parse_mode="html")
 FORMAT_PAIRS = {
-    "bold":      ("**", "**"),
-    "italic":    ("__", "__"),
+    "bold":      ("<b>", "</b>"),
+    "italic":    ("<i>", "</i>"),
     "underline": ("<u>", "</u>"),
-    "strike":    ("~~", "~~"),
-    "spoiler":   ("||", "||"),
+    "strike":    ("<s>", "</s>"),
+    "spoiler":   ("<tg-spoiler>", "</tg-spoiler>"),
 }
 
 FORMAT_LABELS = {
@@ -25,6 +26,10 @@ FORMAT_LABELS = {
     "strike":    "Strike",
     "spoiler":   "Spoiler",
 }
+
+# Order: outermost → innermost (first applied wraps everything)
+# We want bold to be outermost, then italic, then underline, then strike, then spoiler
+FORMAT_ORDER = ("bold", "italic", "underline", "strike", "spoiler")
 
 
 def get_settings(user_id: int) -> dict:
@@ -46,7 +51,7 @@ def any_enabled(user_id: int) -> bool:
 
 def active_list(user_id: int) -> list:
     s = get_settings(user_id)
-    return [FORMAT_LABELS[k] for k in FORMAT_PAIRS.keys() if s.get(k)]
+    return [FORMAT_LABELS[k] for k in FORMAT_ORDER if s.get(k)]
 
 
 def toggle(user_id: int, key: str) -> bool:
@@ -63,19 +68,37 @@ def set_filter(user_id: int, chats_filter: str) -> None:
     db.upsert_text_format(user_id, chats_filter=(chats_filter or "")[:500])
 
 
+def _escape_html(text: str) -> str:
+    """Escape HTML special chars in user text BEFORE wrapping with tags."""
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+
+
 def apply_format(text: str, user_id: int) -> Optional[str]:
-    """Return text wrapped with the enabled formats, or None if no change needed."""
+    """Return text wrapped with the enabled formats (HTML tags), or None.
+
+    User's own text is HTML-escaped so it doesn't break parsing.
+    """
     s = get_settings(user_id)
     if not any(s[k] for k in FORMAT_PAIRS.keys()):
         return None
     if not text or not text.strip():
         return None
-    result = text
-    for key in ("bold", "italic", "underline", "strike", "spoiler"):
+
+    # Escape user's raw text first
+    inner = _escape_html(text)
+
+    # Wrap from innermost to outermost
+    # Apply in reverse order so that "bold" ends up outermost
+    for key in reversed(FORMAT_ORDER):
         if s.get(key):
             op, cl = FORMAT_PAIRS[key]
-            result = f"{op}{result}{cl}"
-    return result
+            inner = f"{op}{inner}{cl}"
+
+    return inner
 
 
 def _chat_allowed(settings: dict, chat_id: int) -> bool:
@@ -98,7 +121,7 @@ def _chat_allowed(settings: dict, chat_id: int) -> bool:
 async def handle_own_message(runtime, user_id: int, chat_id: int,
                               message_id: int, text: str) -> bool:
     """Called for every outgoing message from the user.
-    Edits the message with the enabled formatting if any.
+    Edits the message with HTML formatting if any style is enabled.
     Returns True if the message was edited.
     """
     if not any_enabled(user_id):
@@ -109,7 +132,7 @@ async def handle_own_message(runtime, user_id: int, chat_id: int,
         return False
 
     formatted = apply_format(text, user_id)
-    if not formatted or formatted == text:
+    if not formatted:
         return False
 
     try:
