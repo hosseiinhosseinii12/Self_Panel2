@@ -1,16 +1,21 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
-Key features:
-  * Click buttons by flat index via msg.click(i=N)
-  * Send the 🎰 emoji as a custom Telegram emoji (with effect) if possible
-  * Debug: dump all message entities to identify custom emoji IDs
-  * Persistent listener for panel detection
+Strategy (Martingale with 5M cap):
+  - Start: 100,000
+  - On loss: bet *= 3
+  - On win: reset to 100,000
+  - Cap: 5,000,000 (bot rejects anything above)
+  - Any computed bet above cap → rounded down to 5,000,000
 
-Panel button layout (flat index, left-to-right, top-to-bottom):
-  [0] = 🍷 MEOWIE GAMBLE
-  [1] = 🎰 WHEEL OF FORTUNE  ← the target
-  [2] = 🎲 DICE
-  [3] = 💎 DIAMOND MINE
+Ledger (per user):
+  - total_invested: sum of all bets placed
+  - total_won: sum of winning payouts (bet * multiplier)
+  - total_lost: sum of losing bets
+  - total_profit: won - lost
+  - peak_balance: max(total_won - total_lost)
+  - current_streak: consecutive wins
+  - best_streak: longest consecutive wins
+  - last_multiplier, last_score, last_result
 """
 import asyncio
 import random
@@ -57,8 +62,13 @@ _INLINE_TYPES = (
     "KeyboardButtonSwitchInline",
 )
 
-# Flat indices in the main panel
 WHEEL_INDEX = 1
+
+# Strategy constants
+START_BET = 100_000
+LOSS_MULTIPLIER = 3
+MAX_BET = 5_000_000
+MIN_BET = 1_000
 
 
 # ===========================================================================
@@ -126,14 +136,11 @@ def _log_all_buttons(panel_msg, label: str = "") -> None:
 
 
 def _debug_entities(msg, label: str = "") -> None:
-    """Log all message entities to identify custom emojis."""
     try:
         if not msg:
-            log_bot.info(f"casino: [ent{label}] msg is None")
             return
         text = msg.message or ""
-        log_bot.info(f"casino: [ent{label}] msg_id={msg.id}")
-        log_bot.info(f"casino: [ent{label}] text={text[:300]!r}")
+        log_bot.info(f"casino: [ent{label}] msg_id={msg.id} text={text[:200]!r}")
         if not msg.entities:
             log_bot.info(f"casino: [ent{label}] no entities")
             return
@@ -142,7 +149,6 @@ def _debug_entities(msg, label: str = "") -> None:
             offset = getattr(ent, "offset", None)
             length = getattr(ent, "length", None)
             doc_id = getattr(ent, "document_id", None)
-            # extract the emoji char from the text using offset
             emoji_char = ""
             try:
                 if text and offset is not None and length is not None:
@@ -150,8 +156,8 @@ def _debug_entities(msg, label: str = "") -> None:
             except Exception:
                 pass
             log_bot.info(
-                f"casino: [ent{label}] ent[{i}] "
-                f"type={etype} offset={offset} length={length} "
+                f"casino: [ent{label}] ent[{i}] type={etype} "
+                f"offset={offset} length={length} "
                 f"document_id={doc_id} emoji={emoji_char!r}"
             )
     except Exception as e:
@@ -159,7 +165,6 @@ def _debug_entities(msg, label: str = "") -> None:
 
 
 def _find_button_with_index(msg, patterns: list):
-    """Find a button by text pattern. Returns (button, flat_index)."""
     if not msg or not msg.reply_markup:
         return None, None
     rm = msg.reply_markup
@@ -181,29 +186,56 @@ def _find_button_with_index(msg, patterns: list):
     return None, None
 
 
-def _extract_custom_emoji_from_message(msg) -> Optional[dict]:
-    """Look for a custom emoji in the message and return its ID + offset."""
+def _extract_custom_emoji_from_message(msg, prefer_emoji: str = EMOJI_TRIGGER) -> Optional[dict]:
+    """Extract a custom emoji entity from a message.
+
+    Prefers the emoji that matches `prefer_emoji`, otherwise returns the one
+    whose visible slice looks like the wheel emoji, otherwise the first one.
+
+    Returns dict with keys:
+      - document_id : int
+      - offset      : int
+      - length      : int
+      - raw         : str  (the visible text slice covering the entity)
+    """
     try:
         if not msg or not msg.entities:
             return None
         text = msg.message or ""
+        candidates = []
         for ent in msg.entities:
-            etype = type(ent).__name__
-            if etype != "MessageEntityCustomEmoji":
+            if type(ent).__name__ != "MessageEntityCustomEmoji":
                 continue
             doc_id = getattr(ent, "document_id", None)
             if not doc_id:
                 continue
-            offset = getattr(ent, "offset", 0)
-            length = getattr(ent, "length", 0)
-            emoji_char = text[offset:offset + length] if text else ""
-            return {
-                "document_id": doc_id,
-                "offset": offset,
-                "length": length,
-                "emoji": emoji_char,
-            }
-        return None
+            offset = getattr(ent, "offset", 0) or 0
+            length = getattr(ent, "length", 0) or 0
+            try:
+                slice_text = text[offset:offset + length] if length else ""
+            except Exception:
+                slice_text = ""
+            candidates.append({
+                "document_id": int(doc_id),
+                "offset": int(offset),
+                "length": int(length),
+                "raw": slice_text,
+            })
+        if not candidates:
+            return None
+
+        # 1) Exact match with the requested emoji char
+        for c in candidates:
+            if c["raw"] == prefer_emoji:
+                return c
+
+        # 2) The slice contains the wheel emoji
+        for c in candidates:
+            if prefer_emoji and prefer_emoji in (c["raw"] or ""):
+                return c
+
+        # 3) Fallback: first candidate
+        return candidates[0]
     except Exception as e:
         log_bot.warning(f"casino: extract custom emoji failed: {e}")
         return None
@@ -211,11 +243,7 @@ def _extract_custom_emoji_from_message(msg) -> Optional[dict]:
 
 async def _click_button(client, chat_id: int, message_id: int,
                          btn=None, index: Optional[int] = None) -> bool:
-    """Click an inline button.
-    Priority: index → data → text → raw.
-    """
     if btn is None and index is None:
-        log_bot.warning("casino: click called with no btn and no index")
         return False
     try:
         btext = getattr(btn, "text", "") if btn else ""
@@ -224,19 +252,17 @@ async def _click_button(client, chat_id: int, message_id: int,
             f"casino: [click] index={index} text={btext!r} "
             f"data_len={len(data) if data else 0}"
         )
-
         msg = await client.get_messages(chat_id, ids=message_id)
         if msg is None:
-            log_bot.warning("casino: [click] message not found")
             return False
 
         if index is not None:
             try:
                 await msg.click(i=index)
-                log_bot.info(f"casino: [click] OK via msg.click(i={index})")
+                log_bot.info(f"casino: [click] OK via index={index}")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] index failed: {type(e).__name__}: {e}")
+                log_bot.warning(f"casino: [click] index failed: {e}")
 
         if data:
             try:
@@ -244,7 +270,7 @@ async def _click_button(client, chat_id: int, message_id: int,
                 log_bot.info("casino: [click] OK via data")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] data failed: {type(e).__name__}: {e}")
+                log_bot.warning(f"casino: [click] data failed: {e}")
 
         if btext and btext.strip():
             try:
@@ -252,7 +278,7 @@ async def _click_button(client, chat_id: int, message_id: int,
                 log_bot.info("casino: [click] OK via text")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] text failed: {type(e).__name__}: {e}")
+                log_bot.warning(f"casino: [click] text failed: {e}")
 
         if data:
             try:
@@ -262,52 +288,57 @@ async def _click_button(client, chat_id: int, message_id: int,
                 log_bot.info("casino: [click] OK via raw")
                 return True
             except Exception as e:
-                log_bot.warning(f"casino: [click] raw failed: {type(e).__name__}: {e}")
+                log_bot.warning(f"casino: [click] raw failed: {e}")
 
-        log_bot.error("casino: [click] all methods failed")
         return False
     except Exception as e:
-        log_bot.warning(f"casino: [click] FAILED: {type(e).__name__}: {e}")
+        log_bot.warning(f"casino: [click] FAILED: {e}")
         return False
 
 
 async def _send_reply(client, chat_id: int, text: str, reply_to: int) -> None:
     try:
         await client.send_message(chat_id, text, reply_to=reply_to)
-        log_bot.info(f"casino: replied {text!r} to msg {reply_to}")
     except Exception as e:
-        log_bot.warning(f"casino: reply failed: {type(e).__name__}: {e}")
+        log_bot.warning(f"casino: reply failed: {e}")
 
 
 async def _send_emoji_with_effect(client, chat_id: int, emoji_char: str,
-                                    custom_doc_id: int, reply_to: int) -> bool:
-    """Send an emoji as a Telegram custom emoji (with effect)."""
+                                   custom_doc_id: int, reply_to: int) -> bool:
+    """Send an animated (custom) emoji as a reply.
+
+    Telegram requires:
+      - The visible text MUST be the emoji char (or its placeholder slice).
+      - A MessageEntityCustomEmoji covering the whole text with the correct document_id.
+      - offset/length in UTF-16 code units.
+    """
     if MessageEntityCustomEmoji is None:
         return False
+    if not emoji_char:
+        return False
     try:
-        # length in UTF-16 code units
+        # Length in UTF-16 code units (Telegram uses this)
         length = len(emoji_char.encode("utf-16-le")) // 2
+        if length <= 0:
+            return False
+        entity = MessageEntityCustomEmoji(
+            offset=0,
+            length=length,
+            document_id=int(custom_doc_id),
+        )
         await client.send_message(
             chat_id,
             emoji_char,
-            formatting_entities=[
-                MessageEntityCustomEmoji(
-                    offset=0,
-                    length=length,
-                    document_id=int(custom_doc_id),
-                )
-            ],
+            formatting_entities=[entity],
             reply_to=reply_to,
         )
         log_bot.info(
-            f"casino: sent custom emoji {emoji_char!r} "
-            f"doc_id={custom_doc_id} reply_to={reply_to}"
+            f"casino: sent custom emoji doc_id={custom_doc_id} "
+            f"len={length} reply_to={reply_to}"
         )
         return True
     except Exception as e:
-        log_bot.warning(
-            f"casino: send custom emoji failed: {type(e).__name__}: {e}"
-        )
+        log_bot.warning(f"casino: custom emoji failed: {e}")
         return False
 
 
@@ -319,10 +350,11 @@ def get_config(user_id: int) -> dict:
     return {
         "enabled": bool(c.get("enabled", 0)),
         "chat_id": c.get("chat_id"),
-        "initial_bet": int(c.get("initial_bet", 100000)),
-        "current_bet": int(c.get("current_bet", 100000)),
-        "max_bet": int(c.get("max_bet", 100_000_000)),
-        "min_bet": int(c.get("min_bet", 1000)),
+        "initial_bet": int(c.get("initial_bet", START_BET)),
+        "current_bet": int(c.get("current_bet", START_BET)),
+        "max_bet": int(c.get("max_bet", MAX_BET)),
+        "max_allowed_bet": int(c.get("max_allowed_bet", MAX_BET)),
+        "min_bet": int(c.get("min_bet", MIN_BET)),
         "bet_interval": int(c.get("bet_interval", DEFAULT_INTERVAL)),
         "multipliers": c.get("multipliers", "1.5,2,2.5,3"),
         "strategy_mode": c.get("strategy_mode", "martingale"),
@@ -333,7 +365,16 @@ def get_config(user_id: int) -> dict:
         "total_losses": int(c.get("total_losses", 0)),
         "total_pushes": int(c.get("total_pushes", 0)),
         "total_profit": int(c.get("total_profit", 0)),
+        "total_invested": int(c.get("total_invested", 0)),
+        "total_won": int(c.get("total_won", 0)),
+        "total_lost": int(c.get("total_lost", 0)),
         "peak_bet": int(c.get("peak_bet", 0)),
+        "peak_balance": int(c.get("peak_balance", 0)),
+        "last_multiplier": float(c.get("last_multiplier", 0)),
+        "last_score": int(c.get("last_score", 0)),
+        "last_result": c.get("last_result", ""),
+        "current_streak": int(c.get("current_streak", 0)),
+        "best_streak": int(c.get("best_streak", 0)),
         "panel_msg_id": int(c.get("panel_msg_id", 0) or 0),
     }
 
@@ -351,8 +392,9 @@ def set_chat(user_id: int, chat_id: int) -> None:
 
 
 def set_initial_bet(user_id: int, amount: int) -> None:
-    save_config(user_id, initial_bet=int(amount), current_bet=int(amount),
-                peak_bet=int(amount))
+    amount = max(MIN_BET, int(amount))
+    save_config(user_id, initial_bet=amount, current_bet=amount,
+                peak_bet=amount)
 
 
 def set_interval(user_id: int, seconds: int) -> None:
@@ -364,17 +406,50 @@ def set_multipliers(user_id: int, mults: str) -> None:
 
 
 def reset_progress(user_id: int) -> None:
+    cfg = get_config(user_id)
     save_config(
         user_id,
-        current_bet=get_config(user_id)["initial_bet"],
+        current_bet=cfg["initial_bet"],
         total_plays=0, total_wins=0, total_losses=0, total_pushes=0,
-        total_profit=0, peak_bet=get_config(user_id)["initial_bet"],
+        total_profit=0, total_invested=0, total_won=0, total_lost=0,
+        peak_bet=cfg["initial_bet"],
+        peak_balance=0,
+        last_multiplier=0, last_score=0, last_result="",
+        current_streak=0, best_streak=0,
     )
 
 
 # ===========================================================================
-# Strategy
+# Strategy Engine
 # ===========================================================================
+def compute_next_bet(current_bet: int, result: str,
+                      initial_bet: int = START_BET,
+                      max_allowed: int = MAX_BET) -> int:
+    """Compute the next bet amount based on the last result.
+
+    Rules:
+      - win  → reset to initial_bet
+      - push → keep current_bet
+      - lose → current_bet * LOSS_MULTIPLIER
+      - cap at max_allowed (5M)
+      - round down to nearest 1000
+    """
+    if result == "win":
+        nxt = initial_bet
+    elif result == "push":
+        nxt = current_bet
+    else:  # lose / unknown
+        nxt = current_bet * LOSS_MULTIPLIER
+
+    if nxt > max_allowed:
+        nxt = max_allowed
+    if nxt >= 1000:
+        nxt = (nxt // 1000) * 1000
+    if nxt < MIN_BET:
+        nxt = MIN_BET
+    return nxt
+
+
 def _parse_multipliers(cfg: dict) -> list:
     out = []
     for p in (cfg.get("multipliers") or "1.5,2,2.5,3").split(","):
@@ -388,25 +463,6 @@ def _parse_multipliers(cfg: dict) -> list:
         except ValueError:
             continue
     return out or [1.5, 2.0, 2.5, 3.0]
-
-
-def _next_bet(cfg: dict, result: str, multiplier: float) -> int:
-    current = int(cfg.get("current_bet") or cfg["initial_bet"])
-    initial = int(cfg["initial_bet"])
-    max_bet = int(cfg["max_bet"])
-    mults = _parse_multipliers(cfg)
-    if result == "lose":
-        factor = max(mults) if mults else 3.0
-        nxt = int(current * factor)
-    elif result == "win":
-        nxt = initial
-    else:
-        nxt = current
-    if nxt < int(cfg["min_bet"]):
-        nxt = int(cfg["min_bet"])
-    if nxt > max_bet:
-        nxt = max_bet
-    return nxt
 
 
 # ===========================================================================
@@ -461,11 +517,8 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
                 save_config(user_id, panel_msg_id=event.id)
             except Exception:
                 pass
-            log_bot.info(
-                f"casino: [listener] new panel uid={user_id} msg_id={event.id}"
-            )
-        except Exception as e:
-            log_bot.debug(f"casino: listener new error: {e}")
+        except Exception:
+            pass
 
     @client.on(events.MessageEdited(incoming=True))
     async def _on_edit(event):
@@ -481,22 +534,19 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
                 save_config(user_id, panel_msg_id=event.id)
             except Exception:
                 pass
-            log_bot.info(
-                f"casino: [listener] edited panel uid={user_id} msg_id={event.id}"
-            )
-        except Exception as e:
-            log_bot.debug(f"casino: listener edit error: {e}")
+        except Exception:
+            pass
 
     client._casino_listener_installed = True
     st.listener_installed = True
-    log_bot.info(f"casino: listener installed on user client uid={user_id}")
+    log_bot.info(f"casino: listener installed uid={user_id}")
 
 
 # ===========================================================================
 # Loop
 # ===========================================================================
 async def casino_loop(runtime, user_id: int) -> None:
-    log_bot.info(f"casino: loop started for uid={user_id}")
+    log_bot.info(f"casino: loop started uid={user_id}")
     while not runtime.stop_event.is_set():
         cfg = get_config(user_id)
         if not cfg["enabled"] or not cfg["chat_id"]:
@@ -582,22 +632,19 @@ async def _run_cycle(runtime, user_id: int) -> None:
 async def _play_round(runtime, client, user_id: int, chat_id: int,
                        bet: int, st: CasinoState) -> str:
     try:
-        # ---------- 1. Send "Casino" ----------
+        # 1. Send "Casino"
         log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
-        sent = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
-        sent_id = sent.id
+        await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
         await asyncio.sleep(3.0)
 
-        # ---------- 2. Find panel ----------
+        # 2. Find panel
         panel_msg = None
         if st.last_panel_id:
             cached = await _get_message(client, chat_id, st.last_panel_id)
             if _msg_has_clickable(cached):
                 panel_msg = cached
-                log_bot.info(f"casino: [2] cached panel id={cached.id}")
 
         if panel_msg is None:
-            log_bot.info("casino: [2] searching panel")
             for attempt in range(1, 11):
                 await asyncio.sleep(2.0)
                 msgs = await client.get_messages(chat_id, limit=30)
@@ -606,7 +653,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
                         panel_msg = m
                         break
                 if panel_msg is not None:
-                    log_bot.info(f"casino: [2] found on attempt {attempt}")
                     break
 
         if panel_msg is None:
@@ -618,98 +664,136 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         log_bot.info(f"casino: [2] panel id={panel_msg.id}")
         _log_all_buttons(panel_msg, "init")
 
-        # ---------- 3. Click WHEEL = index 1 ----------
+        # 3. Click WHEEL = index 1
         log_bot.info(f"casino: [3] clicking WHEEL index={WHEEL_INDEX}")
         await _click_button(client, chat_id, panel_msg.id, index=WHEEL_INDEX)
         await asyncio.sleep(3.0)
 
-        # ---------- 4. SET ENTRANCE FEE ----------
-        log_bot.info("casino: [4] clicking SET ENTRANCE FEE")
+        # 4. SET ENTRANCE FEE
+        log_bot.info("casino: [4] SET ENTRANCE FEE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step4")
         btn, idx = _find_button_with_index(panel_msg, [
             r"set\s*entrance\s*fee", r"ꜱᴇᴛ\s*ᴇɴᴛʀᴀɴᴄᴇ", r"entrance\s*fee",
         ])
         if btn is None and idx is None:
-            log_bot.info("casino: [4] not matched, fallback index=0")
             idx = 0
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
-        # ---------- 5. Reply with bet ----------
-        log_bot.info(f"casino: [5] replying with bet {_format_amount(bet)}")
+        # 5. Reply with bet amount
+        log_bot.info(f"casino: [5] reply bet {_format_amount(bet)}")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         await _send_reply(client, chat_id, _format_amount(bet), panel_msg.id)
         await asyncio.sleep(3.0)
 
-        # ---------- 6. SET NUMBER OF PLAYERS ----------
-        log_bot.info("casino: [6] clicking SET NUMBER OF PLAYERS")
+        # 6. SET NUMBER OF PLAYERS
+        log_bot.info("casino: [6] SET NUMBER OF PLAYERS")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6")
         btn, idx = _find_button_with_index(panel_msg, [
             r"set\s*number\s*of\s*players", r"ꜱᴇᴛ\s*ɴᴜᴍʙᴇʀ", r"number\s*of\s*players",
         ])
         if btn is None and idx is None:
-            log_bot.info("casino: [6] not matched, fallback index=0")
             idx = 0
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
-        # click "1"
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6b")
         btn1, idx1 = _find_button_with_index(panel_msg, ["1", "1️⃣", "₁"])
         if btn1 is None and idx1 is None:
             idx1 = 0
-        log_bot.info(f"casino: [6b] clicking '1' index={idx1}")
         await _click_button(client, chat_id, panel_msg.id, btn1, index=idx1)
         await asyncio.sleep(2.0)
 
-        # ---------- 7. CREATE GAMBLING TABLE ----------
-        log_bot.info("casino: [7] clicking CREATE GAMBLING TABLE")
+        # 7. CREATE GAMBLING TABLE
+        log_bot.info("casino: [7] CREATE GAMBLING TABLE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step7")
         btn, idx = _find_button_with_index(panel_msg, [
             r"create\s*gambling\s*table", r"ᴄʀᴇᴀᴛᴇ\s*ɢᴀᴍʙʟɪɴɢ",
         ])
         if btn is None and idx is None:
-            log_bot.info("casino: [7] not matched, fallback index=0")
             idx = 0
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.5)
 
-        # ---------- 8. Reply with 🎰 (prefer custom emoji) ----------
-        log_bot.info("casino: [8] sending 🎰")
+        # -------------------------------------------------------------------
+        # 8. Reply with 🎰 emoji (animated custom emoji when possible)
+        # -------------------------------------------------------------------
+        log_bot.info("casino: [8] send 🎰 (animated if possible)")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
-
-        # DEBUG: dump all entities to identify custom emoji IDs
         _debug_entities(panel_msg, "before-emoji-send")
 
-        custom = _extract_custom_emoji_from_message(panel_msg)
+        # Try to find a custom emoji entity in the panel message
+        custom = _extract_custom_emoji_from_message(panel_msg, prefer_emoji=EMOJI_TRIGGER)
+
+        sent_custom = False
+
         if custom and custom.get("document_id"):
+            # Attempt 1: send the standard wheel emoji with the custom document_id
             log_bot.info(
-                f"casino: [8] found custom emoji in panel "
-                f"doc_id={custom['document_id']} emoji={custom['emoji']!r}"
+                f"casino: [8] trying custom emoji "
+                f"doc_id={custom['document_id']} raw={custom.get('raw')!r}"
             )
-            ok = await _send_emoji_with_effect(
-                client, chat_id, "🎰", custom["document_id"], panel_msg.id
+            sent_custom = await _send_emoji_with_effect(
+                client, chat_id, EMOJI_TRIGGER,
+                custom["document_id"], panel_msg.id,
             )
-            if not ok:
-                log_bot.info("casino: [8] custom emoji failed, sending plain")
-                await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
-        else:
-            log_bot.info("casino: [8] no custom emoji, sending plain 🎰")
+
+            # Attempt 2: if raw slice differs, use that as the visible text
+            if not sent_custom and custom.get("raw") and custom["raw"] != EMOJI_TRIGGER:
+                log_bot.info(
+                    f"casino: [8] retrying with raw slice {custom['raw']!r}"
+                )
+                sent_custom = await _send_emoji_with_effect(
+                    client, chat_id, custom["raw"],
+                    custom["document_id"], panel_msg.id,
+                )
+
+        if not sent_custom:
+            # Attempt 3: look for ANY custom emoji in the last few messages
+            log_bot.info("casino: [8] no custom emoji in panel, scanning recent msgs")
+            try:
+                recent = await client.get_messages(chat_id, limit=10)
+                for m in recent:
+                    if not m or not m.entities:
+                        continue
+                    c2 = _extract_custom_emoji_from_message(m, prefer_emoji=EMOJI_TRIGGER)
+                    if not c2 or not c2.get("document_id"):
+                        continue
+                    log_bot.info(
+                        f"casino: [8] found custom emoji in msg_id={m.id} "
+                        f"doc_id={c2['document_id']} raw={c2.get('raw')!r}"
+                    )
+                    if await _send_emoji_with_effect(
+                        client, chat_id, EMOJI_TRIGGER,
+                        c2["document_id"], panel_msg.id,
+                    ):
+                        sent_custom = True
+                        break
+                    if c2.get("raw") and c2["raw"] != EMOJI_TRIGGER:
+                        if await _send_emoji_with_effect(
+                            client, chat_id, c2["raw"],
+                            c2["document_id"], panel_msg.id,
+                        ):
+                            sent_custom = True
+                            break
+            except Exception as e:
+                log_bot.warning(f"casino: [8] scan for custom emoji failed: {e}")
+
+        if not sent_custom:
+            # Final fallback: plain unicode emoji reply
+            log_bot.info("casino: [8] falling back to plain unicode emoji")
             await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
-        # ---------- 9. Poll ----------
+        # 9. Poll for result
         log_bot.info("casino: [9] polling for result")
         return await _poll_result(client, chat_id, panel_msg.id)
 
     except Exception as e:
-        log_bot.error(
-            f"casino: play_round FAILED: {type(e).__name__}: {e}\n"
-            f"{traceback.format_exc()}"
-        )
+        log_bot.error(f"casino: play_round FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         raise
 
 
@@ -740,6 +824,12 @@ async def _poll_result(client, chat_id: int, msg_id: int) -> str:
 
 
 def _parse_result(text: str) -> Optional[dict]:
+    """Parse the game result from the panel text.
+
+    Patterns:
+      SCORE : 18 | 🍇 BAR 🍇   → win
+      SCORE : 0  | ...          → lose
+    """
     if not text:
         return None
     low = text.lower()
@@ -748,47 +838,109 @@ def _parse_result(text: str) -> Optional[dict]:
         return None
     score = int(m.group(1))
     tail = m.group(2).strip()
-    win_symbols = ["🍇", "🍒", "bar", "💎", "🎰", "7"]
-    lose_symbols = ["0", "❌", "💀", "lose"]
-    if any(s in tail for s in win_symbols):
-        return {"result": "win", "score": score}
-    if any(s in tail for s in lose_symbols):
+
+    if score == 0:
         return {"result": "lose", "score": score}
+    if score > 0:
+        return {"result": "win", "score": score}
     return {"result": "push", "score": score}
 
 
 async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> None:
+    """Update stats and compute next bet with 5M cap."""
     cfg = get_config(user_id)
     st = _get_state(user_id)
+    initial = int(cfg["initial_bet"])
+    max_allowed = int(cfg["max_allowed_bet"])
+
     mults = _parse_multipliers(cfg)
+
+    # Determine multiplier for this run
     if result == "win":
         mult = random.choice(mults) if mults else 2.0
     elif result == "push":
         mult = 1.0
     else:
         mult = 0.0
+
+    # Compute winnings/losses
     if result == "win":
-        profit = int(bet * (mult - 1))
+        winnings = int(bet * mult)
+        profit = winnings - bet  # net profit
+        won_amount = winnings
+        lost_amount = 0
     elif result == "push":
         profit = 0
-    else:
+        won_amount = bet  # bet returned
+        lost_amount = 0
+    else:  # lose
         profit = -bet
-    next_bet = _next_bet(cfg, result, mult)
-    db.update_casino_run(st.run_id, multiplier=float(mult), result=result,
-                          profit=int(profit), status="finished",
-                          finished_at=_now_iso())
+        won_amount = 0
+        lost_amount = bet
+
+    # Next bet
+    next_bet = compute_next_bet(bet, result, initial, max_allowed)
+
+    # New streak
+    if result == "win":
+        new_streak = int(cfg["current_streak"]) + 1
+    elif result == "lose":
+        new_streak = 0
+    else:
+        new_streak = int(cfg["current_streak"])
+    best_streak = max(int(cfg["best_streak"]), new_streak)
+
+    total_invested = int(cfg["total_invested"]) + bet
+    total_won = int(cfg["total_won"]) + won_amount
+    total_lost = int(cfg["total_lost"]) + lost_amount
+    total_profit = int(cfg["total_profit"]) + profit
+    peak_bet = max(int(cfg["peak_bet"]), bet)
+    peak_balance = max(int(cfg["peak_balance"]), total_profit)
+
+    # Update DB
+    db.update_casino_run(
+        st.run_id,
+        multiplier=float(mult),
+        result=result,
+        score=0,  # score not passed here; can add if needed
+        profit=int(profit),
+        status="finished",
+        finished_at=_now_iso(),
+    )
+
     save_config(
         user_id,
         current_bet=int(next_bet),
-        total_plays=cfg["total_plays"] + 1,
-        total_wins=cfg["total_wins"] + (1 if result == "win" else 0),
-        total_losses=cfg["total_losses"] + (1 if result == "lose" else 0),
-        total_profit=cfg["total_profit"] + int(profit),
-        peak_bet=max(cfg["peak_bet"], bet),
+        total_plays=int(cfg["total_plays"]) + 1,
+        total_wins=int(cfg["total_wins"]) + (1 if result == "win" else 0),
+        total_losses=int(cfg["total_losses"]) + (1 if result == "lose" else 0),
+        total_pushes=int(cfg["total_pushes"]) + (1 if result == "push" else 0),
+        total_profit=total_profit,
+        total_invested=total_invested,
+        total_won=total_won,
+        total_lost=total_lost,
+        peak_bet=peak_bet,
+        peak_balance=peak_balance,
+        last_multiplier=float(mult),
+        last_score=0,
+        last_result=result,
+        current_streak=new_streak,
+        best_streak=best_streak,
     )
+
+    # Log to casino_logs
+    db.add_casino_log(
+        user_id, chat_id, "info",
+        f"result={result} bet={_format_amount(bet)} "
+        f"mult={mult} profit={profit} next={_format_amount(next_bet)} "
+        f"streak={new_streak}"
+    )
+
     log_bot.info(
         f"casino: done uid={user_id} result={result} "
-        f"profit={profit} next={next_bet}"
+        f"bet={bet} mult={mult} profit={profit} "
+        f"next={next_bet} streak={new_streak} best={best_streak} "
+        f"invested={total_invested} won={total_won} lost={total_lost}"
     )
 
 
