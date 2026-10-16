@@ -1,10 +1,13 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
 Uses reply_to_msg_id to find the panel message: when we send "Casino",
-the bot replies to our message with the panel. This is the most reliable
-way to identify the panel.
+the bot replies to our message with the panel.
 
-Also accepts KeyboardInlineButton (Telethon's placeholder) as clickable.
+Button positions (from the panel):
+  [0][0] = MEOWIE GAMBLE (first)
+  [0][1] = WHEEL OF FORTUNE (second — what we want)
+  [0][2] = DICE (third)
+  [1][0] = DIAMOND MINE (fourth)
 """
 import asyncio
 import random
@@ -69,6 +72,11 @@ _INLINE_TYPES = (
     "KeyboardButtonSwitchInline",
 )
 
+# Position of WHEEL OF FORTUNE button in the main casino panel
+# From the panel image: [0][0]=Meowie Gamble, [0][1]=Wheel, [0][2]=Dice, [1][0]=Diamond
+WHEEL_BUTTON_ROW = 0
+WHEEL_BUTTON_COL = 1
+
 
 # ===========================================================================
 # Helpers
@@ -106,9 +114,7 @@ def _match_any(text: str, patterns: list) -> bool:
 
 
 def _msg_has_clickable(msg) -> bool:
-    """Check if a message has at least one inline button.
-    Accepts KeyboardInlineButton (Telethon's placeholder).
-    """
+    """Check if a message has at least one inline button."""
     if not msg or not msg.reply_markup:
         return False
     if not hasattr(msg.reply_markup, "rows"):
@@ -202,11 +208,7 @@ def _log_all_buttons(panel_msg) -> None:
 
 
 async def _click_button(client, chat_id: int, message_id: int, btn) -> bool:
-    """Click an inline button. Multi-method fallback:
-      1) msg.click(data=...) — works for KeyboardButtonCallback
-      2) btn.click() — native button method
-      3) msg.click(text=...) — click by button text
-    """
+    """Click an inline button. Multi-method fallback."""
     if btn is None:
         log_bot.warning("casino: click called with None button")
         return False
@@ -605,7 +607,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         # ---------- 2. Find panel ----------
         panel_msg = None
 
-        # Strategy A: cached panel id from listener or DB
         if st.last_panel_id:
             log_bot.info(
                 f"casino: [2] checking cached panel id={st.last_panel_id}"
@@ -622,7 +623,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
                 )
                 st.last_panel_id = None
 
-        # Strategy B: retry loop with reply detection
         if panel_msg is None:
             log_bot.info("casino: [2] finding panel message (retry loop)")
             for attempt in range(1, 11):
@@ -647,11 +647,22 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
         _log_all_buttons(panel_msg)
 
-        # ---------- 3. Click "WHEEL OF FORTUNE" ----------
+        # ---------- 3. Click "WHEEL OF FORTUNE" (2nd button in first row) ----------
         log_bot.info("casino: [3] looking for wheel button")
         btn = _find_button(panel_msg, WHEEL_BUTTON_PATTERNS)
         if btn is None:
-            log_bot.info("casino: [3] wheel not found by text, trying position [0][0]")
+            log_bot.info(
+                f"casino: [3] wheel not found by text, trying position "
+                f"[{WHEEL_BUTTON_ROW}][{WHEEL_BUTTON_COL}]"
+            )
+            btn = _find_button_by_position(
+                panel_msg, row=WHEEL_BUTTON_ROW, col=WHEEL_BUTTON_COL
+            )
+        if btn is None:
+            log_bot.warning(
+                f"casino: [3] position [{WHEEL_BUTTON_ROW}][{WHEEL_BUTTON_COL}] "
+                f"failed, falling back to [0][0]"
+            )
             btn = _find_button_by_position(panel_msg, row=0, col=0)
         if btn is None:
             log_bot.error("casino: [3] FAILED - wheel button not found")
@@ -698,8 +709,8 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         _log_all_buttons(panel_msg)
         btn = _find_button(panel_msg, SET_PLAYERS_PATTERNS)
         if btn is None:
-            log_bot.info("casino: [6] not found by text, trying position [0][1]")
-            btn = _find_button_by_position(panel_msg, row=0, col=1)
+            log_bot.info("casino: [6] not found by text, trying position [0][0]")
+            btn = _find_button_by_position(panel_msg, row=0, col=0)
         if btn is not None:
             log_bot.info("casino: [6] clicking set-players")
             await _click_button(client, chat_id, panel_msg.id, btn)
@@ -754,19 +765,12 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
 
 
 async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
-    """Find the panel message.
-    Priority:
-      1. Reply to our trigger (sent_msg_id) — MOST RELIABLE
-      2. Cached last_panel_id (checked by caller)
-      3. Newest msg with clickable buttons, newer than trigger
-      4. Broad search of last 200
-    """
+    """Find the panel message via reply detection + fallbacks."""
     st = _get_state_by_chat(chat_id)
     try:
-        # Get a chunk of recent messages
         msgs = await client.get_messages(chat_id, limit=50)
 
-        # ---- Priority 1: reply to our trigger ----
+        # Priority 1: reply to our trigger
         log_bot.info(
             f"casino: [panel] looking for reply to trigger {sent_msg_id}"
         )
@@ -778,14 +782,12 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
 
         if reply_candidates:
             log_bot.info(
-                f"casino: [panel] found {len(reply_candidates)} replies "
-                f"to trigger"
+                f"casino: [panel] found {len(reply_candidates)} replies"
             )
             for m in reply_candidates:
                 log_bot.info(
                     f"casino: [panel] reply msg id={m.id} "
-                    f"has_markup={bool(m.reply_markup)} "
-                    f"text={(m.message or '')[:40]!r}"
+                    f"has_markup={bool(m.reply_markup)}"
                 )
                 if _msg_has_clickable(m):
                     log_bot.info(
@@ -794,9 +796,8 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
                     if st:
                         st.last_panel_id = m.id
                     return m
-            log_bot.info("casino: [panel] replies found but none clickable")
 
-        # ---- Priority 2: newest clickable newer than trigger ----
+        # Priority 2: newest clickable, newer than trigger
         best = None
         best_id = 0
         for m in msgs:
@@ -810,14 +811,13 @@ async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
 
         if best is not None:
             log_bot.info(
-                f"casino: [panel] found newer clickable msg id={best.id} "
-                f"(trigger={sent_msg_id})"
+                f"casino: [panel] found newer clickable msg id={best.id}"
             )
             if st:
                 st.last_panel_id = best.id
             return best
 
-        # ---- Priority 3: broad search ----
+        # Priority 3: broad search
         log_bot.info("casino: [panel] falling back to search last 200")
         found = await _find_latest_panel(client, chat_id)
         if found and st:
