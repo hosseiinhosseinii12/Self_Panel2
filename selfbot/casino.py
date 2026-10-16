@@ -507,23 +507,26 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
     try:
         # ---------- 1. Send "Casino" ----------
         log_bot.info(f"casino: [1] sending '{CASINO_TRIGGER_TEXT}' uid={user_id}")
-        await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
-        log_bot.info("casino: [1] sent OK")
+        sent_msg = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
+        sent_msg_id = sent_msg.id
+        log_bot.info(f"casino: [1] sent OK (msg_id={sent_msg_id})")
 
-        # ---------- 2. Find panel with retry (up to 7 attempts = 14s) ----------
+        # ---------- 2. Find panel with retry (up to 10 attempts = 20s) ----------
         log_bot.info("casino: [2] finding panel message (retry loop)")
         panel_msg = None
-        for attempt in range(1, 8):
+        for attempt in range(1, 11):
             await asyncio.sleep(2.0)
-            log_bot.info(f"casino: [2] attempt {attempt}/7")
-            panel_msg = await _find_latest_panel(client, chat_id)
+            log_bot.info(f"casino: [2] attempt {attempt}/10")
+            panel_msg = await _find_panel_after_message(
+                client, chat_id, sent_msg_id
+            )
             if panel_msg is not None:
                 log_bot.info(f"casino: [2] found panel on attempt {attempt}")
                 break
             log_bot.info(f"casino: [2] attempt {attempt} - not found yet")
 
         if panel_msg is None:
-            log_bot.error("casino: [2] FAILED - panel not found after 7 attempts")
+            log_bot.error("casino: [2] FAILED - panel not found after 10 attempts")
             raise TimeoutError("casino panel not found after trigger")
 
         st.panel_msg_id = panel_msg.id
@@ -637,9 +640,79 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         raise
 
 
+async def _find_panel_after_message(client, chat_id: int, sent_msg_id: int):
+    """Find the panel message sent by the bot AFTER our Casino trigger.
+    Strategies (in order):
+      1. Look for a message from the bot that replies to sent_msg_id
+      2. Look for the newest message with clickable buttons, newer than sent_msg_id
+      3. Fall back to searching the last 50 for ANY clickable
+    """
+    try:
+        msgs = await client.get_messages(chat_id, limit=15)
+
+        # Strategy 1: look for reply to our trigger
+        for m in msgs:
+            if m.id <= sent_msg_id:
+                continue
+            reply_to = getattr(m, "reply_to_msg_id", None)
+            if reply_to and reply_to == sent_msg_id:
+                if m.reply_markup and hasattr(m.reply_markup, "rows"):
+                    has_data = False
+                    for row in m.reply_markup.rows:
+                        for b in row.buttons:
+                            if getattr(b, "data", None):
+                                has_data = True
+                                break
+                        if has_data:
+                            break
+                    if has_data:
+                        log_bot.info(
+                            f"casino: [panel] found reply msg id={m.id} "
+                            f"to trigger {sent_msg_id}"
+                        )
+                        return m
+
+        # Strategy 2: newest message with clickable buttons, newer than trigger
+        best = None
+        best_id = 0
+        for m in msgs:
+            if m.id <= sent_msg_id:
+                continue
+            if not m.reply_markup:
+                continue
+            if not hasattr(m.reply_markup, "rows"):
+                continue
+            has_data = False
+            for row in m.reply_markup.rows:
+                for b in row.buttons:
+                    if getattr(b, "data", None):
+                        has_data = True
+                        break
+                if has_data:
+                    break
+            if not has_data:
+                continue
+            if m.id > best_id:
+                best = m
+                best_id = m.id
+
+        if best is not None:
+            log_bot.info(
+                f"casino: [panel] found newer msg id={best.id} "
+                f"(trigger={sent_msg_id})"
+            )
+            return best
+
+        # Strategy 3: fallback — search the last 50 for ANY clickable
+        log_bot.info("casino: [panel] falling back to search last 50")
+        return await _find_latest_panel(client, chat_id)
+    except Exception as e:
+        log_bot.warning(f"casino: [panel] failed: {type(e).__name__}: {e}")
+        return None
+
+
 async def _find_latest_panel(client, chat_id: int):
     """Find the panel message sent by Meowie Casino.
-    Handles in-place edits and delayed responses.
     Accepts any inline button that has `data` (regardless of type name).
     """
     try:
