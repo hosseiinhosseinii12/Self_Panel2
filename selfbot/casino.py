@@ -31,7 +31,7 @@ from .logging_setup import log_bot
 from . import db
 
 try:
-    from telethon import events
+    from telethon import events, functions
     from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
     from telethon.tl.types import (
         ReplyInlineMarkup,
@@ -69,6 +69,71 @@ START_BET = 100_000
 LOSS_MULTIPLIER = 3
 MAX_BET = 5_000_000
 MIN_BET = 1_000
+
+
+# ===========================================================================
+# Custom Emoji Cache
+# ===========================================================================
+# Cache for document_id of the animated 🎰 emoji.
+# Keyed by user_id → document_id (or 0 if not found).
+_CUSTOM_EMOJI_CACHE: dict = {}
+
+
+async def find_wheel_custom_emoji_id(client, user_id: int) -> Optional[int]:
+    """Search for the official animated 🎰 custom emoji document_id.
+
+    Uses messages.SearchCustomEmoji which returns the document_id for the
+    given emoticon. Result is cached per user_id.
+    """
+    cached = _CUSTOM_EMOJI_CACHE.get(int(user_id))
+    if cached:
+        return int(cached)
+
+    if not HAS_TELETHON:
+        return None
+
+    try:
+        me = await client.get_me()
+        access_hash = getattr(me, "access_hash", 0) or 0
+
+        # Newer Telethon: SearchCustomEmojiRequest(emoticon, hash)
+        try:
+            result = await client(functions.messages.SearchCustomEmojiRequest(
+                emoticon=EMOJI_TRIGGER,
+                hash=access_hash,
+            ))
+        except TypeError:
+            # Older signature without hash
+            result = await client(functions.messages.SearchCustomEmojiRequest(
+                emoticon=EMOJI_TRIGGER,
+            ))
+
+        doc_id = None
+        if result is not None:
+            # EmojiList / EmojiGroups / EmojiKeywordsDifference variants
+            doc_id = getattr(result, "document_id", None)
+            if not doc_id:
+                # Some variants return .documents (list of Document)
+                docs = getattr(result, "documents", None) or []
+                for d in docs:
+                    did = getattr(d, "id", None)
+                    if did:
+                        doc_id = did
+                        break
+
+        if doc_id:
+            _CUSTOM_EMOJI_CACHE[int(user_id)] = int(doc_id)
+            log_bot.info(
+                f"casino: resolved custom emoji 🎰 doc_id={doc_id} "
+                f"for uid={user_id}"
+            )
+            return int(doc_id)
+
+        log_bot.warning(f"casino: SearchCustomEmoji returned no doc_id for 🎰")
+        return None
+    except Exception as e:
+        log_bot.warning(f"casino: SearchCustomEmoji 🎰 failed: {e}")
+        return None
 
 
 # ===========================================================================
@@ -224,17 +289,12 @@ def _extract_custom_emoji_from_message(msg, prefer_emoji: str = EMOJI_TRIGGER) -
         if not candidates:
             return None
 
-        # 1) Exact match with the requested emoji char
         for c in candidates:
             if c["raw"] == prefer_emoji:
                 return c
-
-        # 2) The slice contains the wheel emoji
         for c in candidates:
             if prefer_emoji and prefer_emoji in (c["raw"] or ""):
                 return c
-
-        # 3) Fallback: first candidate
         return candidates[0]
     except Exception as e:
         log_bot.warning(f"casino: extract custom emoji failed: {e}")
@@ -303,42 +363,49 @@ async def _send_reply(client, chat_id: int, text: str, reply_to: int) -> None:
         log_bot.warning(f"casino: reply failed: {e}")
 
 
-async def _send_emoji_with_effect(client, chat_id: int, emoji_char: str,
-                                   custom_doc_id: int, reply_to: int) -> bool:
+async def _send_animated_emoji(client, chat_id: int, emoji_char: str,
+                                doc_id: int, reply_to: int) -> bool:
     """Send an animated (custom) emoji as a reply.
 
-    Telegram requires:
-      - The visible text MUST be the emoji char (or its placeholder slice).
-      - A MessageEntityCustomEmoji covering the whole text with the correct document_id.
-      - offset/length in UTF-16 code units.
+    Requirements enforced by Telegram:
+      - The visible text MUST be exactly one unicode emoji.
+      - A MessageEntityCustomEmoji must cover the whole text with the
+        correct document_id.
+      - offset/length are in UTF-16 code units.
     """
     if MessageEntityCustomEmoji is None:
+        log_bot.warning("casino: MessageEntityCustomEmoji unavailable")
         return False
-    if not emoji_char:
+    if not emoji_char or not doc_id:
         return False
+
     try:
-        # Length in UTF-16 code units (Telegram uses this)
+        # Telegram uses UTF-16 code units for entity offset/length
         length = len(emoji_char.encode("utf-16-le")) // 2
         if length <= 0:
             return False
+
         entity = MessageEntityCustomEmoji(
             offset=0,
             length=length,
-            document_id=int(custom_doc_id),
+            document_id=int(doc_id),
         )
+
+        log_bot.info(
+            f"casino: [emoji] sending text={emoji_char!r} "
+            f"len={length} doc_id={doc_id} reply_to={reply_to}"
+        )
+
         await client.send_message(
             chat_id,
             emoji_char,
             formatting_entities=[entity],
             reply_to=reply_to,
         )
-        log_bot.info(
-            f"casino: sent custom emoji doc_id={custom_doc_id} "
-            f"len={length} reply_to={reply_to}"
-        )
+        log_bot.info(f"casino: [emoji] OK doc_id={doc_id}")
         return True
     except Exception as e:
-        log_bot.warning(f"casino: custom emoji failed: {e}")
+        log_bot.warning(f"casino: [emoji] FAILED doc_id={doc_id}: {e}")
         return False
 
 
@@ -425,20 +492,11 @@ def reset_progress(user_id: int) -> None:
 def compute_next_bet(current_bet: int, result: str,
                       initial_bet: int = START_BET,
                       max_allowed: int = MAX_BET) -> int:
-    """Compute the next bet amount based on the last result.
-
-    Rules:
-      - win  → reset to initial_bet
-      - push → keep current_bet
-      - lose → current_bet * LOSS_MULTIPLIER
-      - cap at max_allowed (5M)
-      - round down to nearest 1000
-    """
     if result == "win":
         nxt = initial_bet
     elif result == "push":
         nxt = current_bet
-    else:  # lose / unknown
+    else:
         nxt = current_bet * LOSS_MULTIPLIER
 
     if nxt > max_allowed:
@@ -720,72 +778,83 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await asyncio.sleep(2.5)
 
         # -------------------------------------------------------------------
-        # 8. Reply with 🎰 emoji (animated custom emoji when possible)
+        # 8. Send animated 🎰 custom emoji
         # -------------------------------------------------------------------
-        log_bot.info("casino: [8] send 🎰 (animated if possible)")
+        log_bot.info("casino: [8] sending animated 🎰 custom emoji")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _debug_entities(panel_msg, "before-emoji-send")
 
-        # Try to find a custom emoji entity in the panel message
-        custom = _extract_custom_emoji_from_message(panel_msg, prefer_emoji=EMOJI_TRIGGER)
+        sent = False
 
-        sent_custom = False
-
-        if custom and custom.get("document_id"):
-            # Attempt 1: send the standard wheel emoji with the custom document_id
-            log_bot.info(
-                f"casino: [8] trying custom emoji "
-                f"doc_id={custom['document_id']} raw={custom.get('raw')!r}"
+        # Priority 1: official animated 🎰 via SearchCustomEmoji
+        doc_id = await find_wheel_custom_emoji_id(client, user_id)
+        if doc_id:
+            sent = await _send_animated_emoji(
+                client, chat_id, EMOJI_TRIGGER, doc_id, panel_msg.id,
             )
-            sent_custom = await _send_emoji_with_effect(
-                client, chat_id, EMOJI_TRIGGER,
-                custom["document_id"], panel_msg.id,
-            )
+            if not sent:
+                # Clear cache so next cycle retries the lookup
+                _CUSTOM_EMOJI_CACHE.pop(int(user_id), None)
 
-            # Attempt 2: if raw slice differs, use that as the visible text
-            if not sent_custom and custom.get("raw") and custom["raw"] != EMOJI_TRIGGER:
+        # Priority 2: custom emoji entity present in the panel message itself
+        if not sent:
+            custom = _extract_custom_emoji_from_message(
+                panel_msg, prefer_emoji=EMOJI_TRIGGER,
+            )
+            if custom and custom.get("document_id"):
                 log_bot.info(
-                    f"casino: [8] retrying with raw slice {custom['raw']!r}"
+                    f"casino: [8] trying panel-derived doc_id="
+                    f"{custom['document_id']} raw={custom.get('raw')!r}"
                 )
-                sent_custom = await _send_emoji_with_effect(
-                    client, chat_id, custom["raw"],
+                sent = await _send_animated_emoji(
+                    client, chat_id, EMOJI_TRIGGER,
                     custom["document_id"], panel_msg.id,
                 )
+                if not sent and custom.get("raw") and custom["raw"] != EMOJI_TRIGGER:
+                    sent = await _send_animated_emoji(
+                        client, chat_id, custom["raw"],
+                        custom["document_id"], panel_msg.id,
+                    )
 
-        if not sent_custom:
-            # Attempt 3: look for ANY custom emoji in the last few messages
-            log_bot.info("casino: [8] no custom emoji in panel, scanning recent msgs")
+        # Priority 3: scan recent messages for any custom 🎰 entity
+        if not sent:
+            log_bot.info("casino: [8] scanning recent msgs for custom 🎰")
             try:
-                recent = await client.get_messages(chat_id, limit=10)
+                recent = await client.get_messages(chat_id, limit=15)
                 for m in recent:
                     if not m or not m.entities:
                         continue
-                    c2 = _extract_custom_emoji_from_message(m, prefer_emoji=EMOJI_TRIGGER)
+                    c2 = _extract_custom_emoji_from_message(
+                        m, prefer_emoji=EMOJI_TRIGGER,
+                    )
                     if not c2 or not c2.get("document_id"):
                         continue
                     log_bot.info(
-                        f"casino: [8] found custom emoji in msg_id={m.id} "
+                        f"casino: [8] found in msg_id={m.id} "
                         f"doc_id={c2['document_id']} raw={c2.get('raw')!r}"
                     )
-                    if await _send_emoji_with_effect(
+                    if await _send_animated_emoji(
                         client, chat_id, EMOJI_TRIGGER,
                         c2["document_id"], panel_msg.id,
                     ):
-                        sent_custom = True
+                        sent = True
                         break
                     if c2.get("raw") and c2["raw"] != EMOJI_TRIGGER:
-                        if await _send_emoji_with_effect(
+                        if await _send_animated_emoji(
                             client, chat_id, c2["raw"],
                             c2["document_id"], panel_msg.id,
                         ):
-                            sent_custom = True
+                            sent = True
                             break
             except Exception as e:
-                log_bot.warning(f"casino: [8] scan for custom emoji failed: {e}")
+                log_bot.warning(f"casino: [8] scan failed: {e}")
 
-        if not sent_custom:
-            # Final fallback: plain unicode emoji reply
-            log_bot.info("casino: [8] falling back to plain unicode emoji")
+        # Final fallback: plain unicode emoji
+        if not sent:
+            log_bot.warning(
+                "casino: [8] all custom emoji attempts failed, "
+                "using plain unicode 🎰"
+            )
             await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
         # 9. Poll for result
@@ -824,12 +893,6 @@ async def _poll_result(client, chat_id: int, msg_id: int) -> str:
 
 
 def _parse_result(text: str) -> Optional[dict]:
-    """Parse the game result from the panel text.
-
-    Patterns:
-      SCORE : 18 | 🍇 BAR 🍇   → win
-      SCORE : 0  | ...          → lose
-    """
     if not text:
         return None
     low = text.lower()
@@ -847,7 +910,6 @@ def _parse_result(text: str) -> Optional[dict]:
 
 
 async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> None:
-    """Update stats and compute next bet with 5M cap."""
     cfg = get_config(user_id)
     st = _get_state(user_id)
     initial = int(cfg["initial_bet"])
@@ -855,7 +917,6 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
 
     mults = _parse_multipliers(cfg)
 
-    # Determine multiplier for this run
     if result == "win":
         mult = random.choice(mults) if mults else 2.0
     elif result == "push":
@@ -863,25 +924,22 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
     else:
         mult = 0.0
 
-    # Compute winnings/losses
     if result == "win":
         winnings = int(bet * mult)
-        profit = winnings - bet  # net profit
+        profit = winnings - bet
         won_amount = winnings
         lost_amount = 0
     elif result == "push":
         profit = 0
-        won_amount = bet  # bet returned
+        won_amount = bet
         lost_amount = 0
-    else:  # lose
+    else:
         profit = -bet
         won_amount = 0
         lost_amount = bet
 
-    # Next bet
     next_bet = compute_next_bet(bet, result, initial, max_allowed)
 
-    # New streak
     if result == "win":
         new_streak = int(cfg["current_streak"]) + 1
     elif result == "lose":
@@ -897,12 +955,11 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
     peak_bet = max(int(cfg["peak_bet"]), bet)
     peak_balance = max(int(cfg["peak_balance"]), total_profit)
 
-    # Update DB
     db.update_casino_run(
         st.run_id,
         multiplier=float(mult),
         result=result,
-        score=0,  # score not passed here; can add if needed
+        score=0,
         profit=int(profit),
         status="finished",
         finished_at=_now_iso(),
@@ -928,7 +985,6 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int, result: str) -> No
         best_streak=best_streak,
     )
 
-    # Log to casino_logs
     db.add_casino_log(
         user_id, chat_id, "info",
         f"result={result} bet={_format_amount(bet)} "
