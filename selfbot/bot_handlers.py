@@ -1,4 +1,8 @@
-"""Telegram bot runtime — login-first with QR, per-user, group-first jobs."""
+"""Telegram bot runtime — login-first with QR, per-user, group-first jobs.
+
+Includes: text-format auto-edit hook (bold/italic/underline/strike/spoiler)
+and OTP generation for the user web panel.
+"""
 import asyncio
 import io
 import os
@@ -24,6 +28,8 @@ from . import referrals as REF
 from . import users as U
 from . import clock as CLK
 from . import qr_login as QRL
+from . import text_format as TF
+from . import user_otp as OTP
 
 try:
     from telethon import Button, TelegramClient, events, functions
@@ -37,7 +43,7 @@ except ImportError:
 
 
 # ===========================================================================
-# Job flow helpers (used inline)
+# Job flow helpers
 # ===========================================================================
 def _job_interval_text(target_id: int) -> str:
     return (
@@ -286,6 +292,9 @@ def _register_handlers(rt: BotRuntime) -> None:
     if bot is None:
         return
 
+    # ---------------------------------------------------------------------
+    # /start
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/start$", incoming=True))
     @_guarded(rt)
     async def _start(event):
@@ -313,11 +322,17 @@ def _register_handlers(rt: BotRuntime) -> None:
             return
         await event.respond(P.main_panel_text(uid), buttons=P.main_panel_buttons())
 
+    # ---------------------------------------------------------------------
+    # /help
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/help$", incoming=True))
     @_guarded(rt)
     async def _help(event):
         await event.respond(P.help_text(), buttons=P.help_buttons())
 
+    # ---------------------------------------------------------------------
+    # /login
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/login$", incoming=True))
     @_guarded(rt)
     async def _login(event):
@@ -332,6 +347,9 @@ def _register_handlers(rt: BotRuntime) -> None:
         await event.respond(P.login_required_text(),
                             buttons=P.login_required_buttons())
 
+    # ---------------------------------------------------------------------
+    # /logout
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/logout$", incoming=True))
     @_guarded(rt)
     async def _logout(event):
@@ -357,12 +375,39 @@ def _register_handlers(rt: BotRuntime) -> None:
         rt.save_state()
         await event.respond("✅ Logged out and session deleted.")
 
+    # ---------------------------------------------------------------------
+    # /account
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/account$", incoming=True))
     @_guarded(rt)
     async def _account(event):
         uid = event.sender_id
         await event.respond(P.account_text(uid), buttons=P.account_buttons())
 
+    # ---------------------------------------------------------------------
+    # /web — issue OTP
+    # ---------------------------------------------------------------------
+    @bot.on(events.NewMessage(pattern=r"^/web$", incoming=True))
+    @_guarded(rt)
+    async def _web(event):
+        uid = event.sender_id
+        try:
+            U.ensure_user(uid)
+        except Exception:
+            pass
+        code = OTP.generate_for_user(uid)
+        base = _public_base_url()
+        await event.respond(
+            P.otp_text(uid, code, OTP.get_ttl()),
+            buttons=[
+                [Button.url("🌐 Open Web Panel", f"{base}/user/login")],
+            ],
+            parse_mode="md",
+        )
+
+    # ---------------------------------------------------------------------
+    # /refer
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/refer(?:\s+(\S+))?$", incoming=True))
     @_guarded(rt)
     async def _refer(event):
@@ -378,6 +423,9 @@ def _register_handlers(rt: BotRuntime) -> None:
         else:
             await event.respond("❌ Invalid or already-used referral code.")
 
+    # ---------------------------------------------------------------------
+    # Raw handler (peer picker)
+    # ---------------------------------------------------------------------
     @bot.on(events.Raw)
     async def raw_handler(update):
         try:
@@ -419,6 +467,9 @@ def _register_handlers(rt: BotRuntime) -> None:
         except Exception as e:
             log_bot.error(f"raw_handler error: {type(e).__name__}: {e}")
 
+    # ---------------------------------------------------------------------
+    # Callback router
+    # ---------------------------------------------------------------------
     @bot.on(events.CallbackQuery())
     @_guarded(rt)
     async def _cb(event):
@@ -431,6 +482,33 @@ def _register_handlers(rt: BotRuntime) -> None:
         except Exception as e:
             log_bot.warning(f"callback error data={data}: {type(e).__name__}: {e}")
 
+    # ---------------------------------------------------------------------
+    # Outgoing text-format hook
+    # ---------------------------------------------------------------------
+    @bot.on(events.NewMessage(outgoing=True))
+    async def _outgoing_format(event):
+        """Auto-edit outgoing messages with the enabled text styles."""
+        try:
+            if not (event.is_private or event.is_group):
+                return
+            uid = event.sender_id or 0
+            if not uid:
+                return
+            chat_id = event.chat_id
+            if chat_id is None:
+                return
+            text = event.raw_text or ""
+            if not text.strip():
+                return
+            if text.startswith(("/", ".")):
+                return
+            await TF.handle_own_message(rt, uid, chat_id, event.id, text)
+        except Exception as e:
+            log_bot.debug(f"outgoing format hook: {type(e).__name__}: {e}")
+
+    # ---------------------------------------------------------------------
+    # Text handler (private messages)
+    # ---------------------------------------------------------------------
     @bot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     @_guarded(rt)
     async def _text(event):
@@ -443,6 +521,7 @@ def _register_handlers(rt: BotRuntime) -> None:
         step = st.get("step") or "idle"
         awaiting = st.get("awaiting") or {}
 
+        # ---------- QR 2FA ----------
         if awaiting.get("qr_2fa_password"):
             awaiting.pop("qr_2fa_password", None)
             rt.save_state()
@@ -455,6 +534,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond(f"❌ 2FA failed: {e}")
             return
 
+        # ---------- Manual chat ID (job flow) ----------
         if awaiting.get("manual_chat_id"):
             awaiting.pop("manual_chat_id", None)
             rt.save_state()
@@ -472,6 +552,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                                 parse_mode="md")
             return
 
+        # ---------- Job custom interval ----------
         if awaiting.get("job_interval_custom"):
             awaiting.pop("job_interval_custom", None)
             rt.save_state()
@@ -490,6 +571,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond("❌ Invalid number.")
             return
 
+        # ---------- Job custom duration ----------
         if awaiting.get("job_duration_custom"):
             awaiting.pop("job_duration_custom", None)
             rt.save_state()
@@ -508,6 +590,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond("❌ Invalid number.")
             return
 
+        # ---------- Job text ----------
         if awaiting.get("job_text"):
             awaiting.pop("job_text", None)
             rt.save_state()
@@ -519,6 +602,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                                 parse_mode="md")
             return
 
+        # ---------- Job text file ----------
         if awaiting.get("job_text_file") and event.document:
             awaiting.pop("job_text_file", None)
             rt.save_state()
@@ -535,6 +619,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond(f"❌ Could not read file: {e}")
             return
 
+        # ---------- Login: phone ----------
         if step == "phone":
             phone = re.sub(r"[^\d+]", "", text)
             if not phone:
@@ -578,6 +663,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond(f"❌ Error: `{type(e).__name__}`")
             return
 
+        # ---------- Login: code ----------
         if step == "code":
             code = re.sub(r"\D", "", text)
             await _tidy(event)
@@ -610,6 +696,7 @@ def _register_handlers(rt: BotRuntime) -> None:
             await _finish_login(rt, uid, event, st)
             return
 
+        # ---------- Login: 2FA ----------
         if step == "2fa":
             await _tidy(event)
             client = rt.user_clients.get(uid)
@@ -628,6 +715,7 @@ def _register_handlers(rt: BotRuntime) -> None:
             await _finish_login(rt, uid, event, st)
             return
 
+        # ---------- Interval setting ----------
         if awaiting.get("interval"):
             awaiting.pop("interval", None)
             rt.save_state()
@@ -642,6 +730,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond("❌ Invalid number.")
             return
 
+        # ---------- Timezone ----------
         if awaiting.get("timezone"):
             awaiting.pop("timezone", None)
             rt.save_state()
@@ -654,6 +743,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond("❌ Invalid timezone.")
             return
 
+        # ---------- Base name ----------
         if awaiting.get("base_name"):
             awaiting.pop("base_name", None)
             rt.save_state()
@@ -661,6 +751,7 @@ def _register_handlers(rt: BotRuntime) -> None:
             await event.respond("✅ Base name updated.")
             return
 
+        # ---------- Custom name font ----------
         if awaiting.get("custom_name_font"):
             awaiting.pop("custom_name_font", None)
             rt.save_state()
@@ -671,6 +762,7 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond("✅ Custom name font saved.")
             return
 
+        # ---------- Custom clock font ----------
         if awaiting.get("custom_clock_font"):
             awaiting.pop("custom_clock_font", None)
             rt.save_state()
@@ -681,6 +773,21 @@ def _register_handlers(rt: BotRuntime) -> None:
                 await event.respond("✅ Custom clock font saved.")
             return
 
+        # ---------- Text format chat filter ----------
+        if awaiting.get("tf_filter"):
+            awaiting.pop("tf_filter", None)
+            rt.save_state()
+            if text.strip().lower() in ("all", "*", "none", ""):
+                TF.set_filter(uid, "")
+                await event.respond("✅ Filter cleared (all chats).",
+                                    buttons=P.textformat_buttons(uid))
+            else:
+                TF.set_filter(uid, text.strip())
+                await event.respond("✅ Filter saved.",
+                                    buttons=P.textformat_buttons(uid))
+            return
+
+        # ---------- User request diamonds ----------
         user_key = f"user_reqdiamonds:{uid}"
         if awaiting.get(user_key):
             awaiting.pop(user_key, None)
@@ -710,7 +817,6 @@ async def _finish_login(rt: BotRuntime, uid: int, event, st: dict) -> None:
     except Exception:
         pass
 
-    # persist session string to DB
     try:
         from .session_manager import save_from_client
         client = rt.user_clients.get(uid)
@@ -725,6 +831,9 @@ async def _finish_login(rt: BotRuntime, uid: int, event, st: dict) -> None:
     )
 
 
+# ===========================================================================
+# Callback router
+# ===========================================================================
 async def _route_callback(rt: BotRuntime, event, data: str) -> None:
     bot = rt.bot_client
     uid = event.sender_id
@@ -742,10 +851,18 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
             except Exception:
                 pass
 
+    # ---------- auth gate ----------
     if data.startswith("nav:") and data != "nav:help" and not logged_in:
-        await edit(P.login_required_text(), P.login_required_buttons())
-        return
+        allowed_without_login = (
+            "nav:main", "nav:help", "nav:account", "nav:status",
+            "nav:settings", "nav:appearance", "nav:jobs",
+            "nav:textformat", "nav:webotp",
+        )
+        if data not in allowed_without_login:
+            await edit(P.login_required_text(), P.login_required_buttons())
+            return
 
+    # ---------- auth actions ----------
     if data == "auth:start_login":
         st["step"] = "phone"
         st["phone"] = None
@@ -759,6 +876,7 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
         await _handle_qr_login(rt, uid, event)
         return
 
+    # ---------- navigation ----------
     if data == "nav:main":
         await edit(P.main_panel_text(uid), P.main_panel_buttons()); return
     if data == "nav:status":
@@ -778,20 +896,19 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
     if data == "nav:help":
         await edit(P.help_text(), P.help_buttons()); return
 
-    if data == "nav:webpanel":
-        try:
-            from .user_panel import issue_web_token
-            tok = issue_web_token(uid)
-            url = f"{_public_base_url()}/user/?token={tok}"
-            await edit(
-                "**🌐 Your Web Panel**\n\nOpen the panel below to manage your account.",
-                [[Button.url("Open Web Panel", url)], [P._back_btn(b"nav:main")]],
-            )
-        except Exception as e:
-            log_bot.error(f"webpanel error: {e}")
-            await edit(f"❌ Could not generate link: {e}", [[P._back_btn(b"nav:main")]])
+    if data == "nav:webotp":
+        code = OTP.generate_for_user(uid)
+        base = _public_base_url()
+        await edit(
+            P.otp_text(uid, code, OTP.get_ttl()),
+            [
+                [Button.url("🌐 Open Web Panel", f"{base}/user/login")],
+                [P._back_btn(b"nav:main")],
+            ],
+        )
         return
 
+    # ---------- clock ----------
     if data == "clock:on":
         client = rt.user_clients.get(uid)
         if not client:
@@ -809,6 +926,7 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
             CLK.stop_clock(uid)
         await edit(P.main_panel_text(uid), P.main_panel_buttons()); return
 
+    # ---------- settings ----------
     if data == "set:interval":
         st["awaiting"]["interval"] = True
         rt.save_state()
@@ -825,6 +943,7 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
         save_config(CONFIG)
         await edit(P.language_text(), P.language_buttons()); return
 
+    # ---------- appearance ----------
     if data == "app:base":
         st["awaiting"]["base_name"] = True
         rt.save_state()
@@ -869,6 +988,7 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
         rt.save_state()
         await edit("0️⃣ Send 10 characters for 0–9:", [[P._back_btn(b"nav:appearance")]]); return
 
+    # ---------- jobs ----------
     if data == "job:new":
         st["job_draft"] = {}
         st["awaiting"] = {}
@@ -1089,6 +1209,29 @@ async def _route_callback(rt: BotRuntime, event, data: str) -> None:
         n = J.stop_all(owner_id=uid)
         await edit(f"⏹ Stopped {n} jobs.", [[P._back_btn(b"nav:jobs")]]); return
 
+    # ---------- text format ----------
+    if data == "nav:textformat":
+        await edit(P.textformat_text(uid), P.textformat_buttons(uid))
+        return
+
+    if data.startswith("tf:"):
+        key = data.split(":", 1)[1]
+        if key == "filter":
+            st["awaiting"]["tf_filter"] = True
+            rt.save_state()
+            await edit(
+                "**📋 Chat filter**\n\n"
+                "Send comma-separated chat IDs (e.g. `-1001234,-1005678`), "
+                "or `all` to disable filter:",
+                [[P._back_btn(b"nav:textformat")]],
+            )
+            return
+        if key in TF.FORMAT_PAIRS:
+            TF.toggle(uid, key)
+            await edit(P.textformat_text(uid), P.textformat_buttons(uid))
+            return
+
+    # ---------- account ----------
     if data == "acc:reqdiamonds":
         st["awaiting"][f"user_reqdiamonds:{uid}"] = True
         rt.save_state()
@@ -1174,7 +1317,6 @@ async def _watchdog(rt: BotRuntime) -> None:
                 if client and not client.is_connected():
                     try:
                         await client.connect()
-                        # notify if session no longer authorized
                         try:
                             if not await client.is_user_authorized():
                                 log_bot.warning(f"session expired for uid={uid}")

@@ -63,8 +63,10 @@ async def _set_bot_commands(bot) -> None:
     commands = [
         BotCommand(command="start", description="Open panel"),
         BotCommand(command="help", description="Help"),
-        BotCommand(command="login", description="Login"),
-        BotCommand(command="logout", description="Logout"),
+        BotCommand(command="login", description="Login to Telegram"),
+        BotCommand(command="logout", description="Log out"),
+        BotCommand(command="account", description="Account info"),
+        BotCommand(command="web", description="Get OTP for web panel"),
     ]
     try:
         await bot(SetBotCommandsRequest(
@@ -99,7 +101,7 @@ async def _make_bot_client(runtime):
 async def make_user_client_for_login(user_id: int = None):
     api_id, api_hash = get_api_credentials()
 
-    # try session string from DB first
+    # 1. try session string from DB
     if user_id is not None:
         try:
             from .session_manager import get_session_by_user, get_session
@@ -126,7 +128,7 @@ async def make_user_client_for_login(user_id: int = None):
         except Exception as e:
             log_bot.warning(f"could not restore from DB: {e}")
 
-    # fallback to .session file
+    # 2. fallback to .session file
     if user_id is not None:
         session_path = str(DB_PATH / f"user_{int(user_id)}.session")
     else:
@@ -155,7 +157,6 @@ async def _load_user_sessions(runtime) -> None:
             continue
         uid = int(uid_str)
 
-        # try loading from session_manager first
         session_file = DB_PATH / f"user_{uid}.session"
         from_manager = False
         try:
@@ -225,7 +226,7 @@ async def _boot_async(runtime) -> None:
     except Exception as e:
         log.warning(f"session migration skipped: {e}")
 
-    # ---- 3. auto-fetch sessions on startup ----
+    # ---- 3. auto-fetch sessions ----
     auto_fetch = os.environ.get("AUTO_FETCH_ON_START", "true").lower() in \
         ("1", "true", "yes", "on")
     if auto_fetch:
@@ -286,14 +287,14 @@ async def _boot_async(runtime) -> None:
     code = getattr(runtime, "pairing_code", "------")
     log.info(f"PAIRING CODE: {code}")
 
-    # ---- 7. user sessions ----
+    # ---- 7. load user sessions ----
     log.info("loading user sessions…")
     try:
         await _load_user_sessions(runtime)
     except Exception as e:
         log.warning(f"session load failed: {e}")
 
-    # ---- 8. handlers ----
+    # ---- 8. handlers + watchdog ----
     log.info("registering bot handlers…")
     try:
         from .bot_handlers import _register_handlers, start_watchdog
@@ -302,11 +303,11 @@ async def _boot_async(runtime) -> None:
     except Exception as e:
         log.error(f"handler registration failed: {e}")
 
-    # ---- 9. scheduler ----
+    # ---- 9. backup scheduler ----
     try:
         _start_scheduler(runtime)
     except Exception as e:
-        log.warning(f"scheduler failed: {e}")
+        log.warning(f"backup scheduler failed: {e}")
 
     log.info("=== SELF BOT ready ===")
 
@@ -348,7 +349,7 @@ def _start_scheduler(runtime) -> None:
 
     sched.start()
     runtime._scheduler = sched
-    log.info(f"scheduler started (session backup every {interval_h}h)")
+    log.info(f"backup scheduler started (session backup every {interval_h}h)")
 
 
 def shutdown_all(runtime) -> None:

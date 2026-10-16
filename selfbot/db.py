@@ -156,21 +156,6 @@ CREATE TABLE IF NOT EXISTS history (
     finished_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS autolikes (
-    id TEXT PRIMARY KEY,
-    owner_id INTEGER,
-    chat_id INTEGER,
-    reaction TEXT DEFAULT '❤',
-    count INTEGER DEFAULT 25,
-    interval INTEGER DEFAULT 600,
-    duration INTEGER DEFAULT 0,
-    liked INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'running',
-    created_at TEXT,
-    finished_at TEXT,
-    error TEXT
-);
-
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -224,6 +209,25 @@ CREATE TABLE IF NOT EXISTS admin_totp (
 CREATE TABLE IF NOT EXISTS kv_store (
     key TEXT PRIMARY KEY,
     value TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS user_otp (
+    user_id INTEGER PRIMARY KEY,
+    code TEXT DEFAULT '',
+    expires_at TEXT DEFAULT '',
+    used INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS text_format_settings (
+    user_id INTEGER PRIMARY KEY,
+    bold INTEGER DEFAULT 0,
+    italic INTEGER DEFAULT 0,
+    underline INTEGER DEFAULT 0,
+    strike INTEGER DEFAULT 0,
+    spoiler INTEGER DEFAULT 0,
+    chats_filter TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
 """
@@ -341,6 +345,19 @@ def find_user_by_referral_code(code: str) -> Optional[int]:
     row = conn.execute(
         "SELECT id FROM users WHERE UPPER(referral_code) = ? LIMIT 1",
         (code.strip().upper(),)
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def find_user_by_username(username: str) -> Optional[int]:
+    _ensure_ready()
+    if not username:
+        return None
+    clean = username.lstrip("@").strip()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM users WHERE LOWER(username) = ? LIMIT 1",
+        (clean.lower(),)
     ).fetchone()
     return int(row["id"]) if row else None
 
@@ -683,3 +700,101 @@ def delete_session(session_id: int) -> None:
     _ensure_ready()
     conn = get_conn()
     conn.execute("DELETE FROM sessions WHERE id = ?", (int(session_id),))
+
+
+# ===========================================================================
+# User OTP
+# ===========================================================================
+def set_user_otp(user_id: int, code: str, expires_at: str) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO user_otp (user_id, code, expires_at, used, created_at) "
+        "VALUES (?, ?, ?, 0, ?)",
+        (int(user_id), code, expires_at,
+         datetime.now(dt_timezone.utc).isoformat()),
+    )
+
+
+def get_user_otp(user_id: int) -> Optional[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM user_otp WHERE user_id = ?",
+                       (int(user_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def find_user_by_otp(code: str) -> Optional[int]:
+    _ensure_ready()
+    if not code:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT user_id FROM user_otp WHERE code = ? AND used = 0 LIMIT 1",
+        (code.strip(),),
+    ).fetchone()
+    return int(row["user_id"]) if row else None
+
+
+def mark_otp_used(user_id: int) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute("UPDATE user_otp SET used = 1 WHERE user_id = ?",
+                 (int(user_id),))
+
+
+def clear_user_otp(user_id: int) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute("DELETE FROM user_otp WHERE user_id = ?", (int(user_id),))
+
+
+# ===========================================================================
+# Text format settings
+# ===========================================================================
+def get_text_format(user_id: int) -> Optional[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM text_format_settings WHERE user_id = ?",
+                       (int(user_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_text_format(user_id: int, **fields) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT user_id FROM text_format_settings WHERE user_id = ?",
+        (int(user_id),),
+    ).fetchone()
+    fields["updated_at"] = datetime.now(dt_timezone.utc).isoformat()
+    if existing is None:
+        cols = ["user_id"] + list(fields.keys())
+        vals = [int(user_id)] + list(fields.values())
+        placeholders = ",".join("?" * len(cols))
+        conn.execute(
+            f"INSERT INTO text_format_settings ({','.join(cols)}) "
+            f"VALUES ({placeholders})", vals,
+        )
+    else:
+        sets = []
+        vals = []
+        for k, v in fields.items():
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        vals.append(int(user_id))
+        conn.execute(
+            f"UPDATE text_format_settings SET {','.join(sets)} WHERE user_id = ?",
+            vals,
+        )
+
+
+def list_text_format_active() -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM text_format_settings "
+        "WHERE bold = 1 OR italic = 1 OR underline = 1 "
+        "OR strike = 1 OR spoiler = 1"
+    ).fetchall()
+    return [dict(r) for r in rows]
