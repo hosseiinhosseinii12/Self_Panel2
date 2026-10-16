@@ -1,0 +1,24 @@
+# Ensure shell scripts always use LF
+*.sh        text eol=lf
+entrypoint.sh text eol=lf
+
+# Dockerfile uses LF
+Dockerfile  text eol=lf
+
+# Python files
+*.py        text eol=lf
+
+# Config files
+*.toml      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+
+# Windows scripts use CRLF
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+
+# Binary files
+*.png       binary
+*.jpg       binary
+*.zip       binary
