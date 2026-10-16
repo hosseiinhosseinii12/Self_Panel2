@@ -242,7 +242,8 @@ CREATE TABLE IF NOT EXISTS casino_config (
     panel_msg_id INTEGER DEFAULT 0,
     initial_bet INTEGER DEFAULT 100000,
     current_bet INTEGER DEFAULT 100000,
-    max_bet INTEGER DEFAULT 100000000,
+    max_bet INTEGER DEFAULT 5000000,
+    max_allowed_bet INTEGER DEFAULT 5000000,
     min_bet INTEGER DEFAULT 1000,
     bet_interval INTEGER DEFAULT 301,
     multipliers TEXT DEFAULT '1.5,2,2.5,3',
@@ -254,7 +255,16 @@ CREATE TABLE IF NOT EXISTS casino_config (
     total_losses INTEGER DEFAULT 0,
     total_pushes INTEGER DEFAULT 0,
     total_profit INTEGER DEFAULT 0,
+    total_invested INTEGER DEFAULT 0,
+    total_won INTEGER DEFAULT 0,
+    total_lost INTEGER DEFAULT 0,
     peak_bet INTEGER DEFAULT 0,
+    peak_balance INTEGER DEFAULT 0,
+    last_multiplier REAL DEFAULT 0,
+    last_score INTEGER DEFAULT 0,
+    last_result TEXT DEFAULT '',
+    current_streak INTEGER DEFAULT 0,
+    best_streak INTEGER DEFAULT 0,
     updated_at TEXT DEFAULT ''
 );
 
@@ -324,6 +334,16 @@ def init_db() -> None:
         ccols = {row["name"] for row in cur.fetchall()}
         cwanted = {
             "panel_msg_id": "INTEGER DEFAULT 0",
+            "max_allowed_bet": "INTEGER DEFAULT 5000000",
+            "last_multiplier": "REAL DEFAULT 0",
+            "last_score": "INTEGER DEFAULT 0",
+            "last_result": "TEXT DEFAULT ''",
+            "total_invested": "INTEGER DEFAULT 0",
+            "total_won": "INTEGER DEFAULT 0",
+            "total_lost": "INTEGER DEFAULT 0",
+            "peak_balance": "INTEGER DEFAULT 0",
+            "current_streak": "INTEGER DEFAULT 0",
+            "best_streak": "INTEGER DEFAULT 0",
         }
         for col, decl in cwanted.items():
             if col not in ccols:
@@ -886,8 +906,10 @@ def get_casino_config(user_id: int) -> Optional[dict]:
 def upsert_casino_config(user_id: int, **fields) -> None:
     _ensure_ready()
     conn = get_conn()
-    existing = conn.execute("SELECT user_id FROM casino_config WHERE user_id = ?",
-                             (int(user_id),)).fetchone()
+    existing = conn.execute(
+        "SELECT user_id FROM casino_config WHERE user_id = ?",
+        (int(user_id),),
+    ).fetchone()
     fields["updated_at"] = datetime.now(dt_timezone.utc).isoformat()
     if existing is None:
         cols = ["user_id"] + list(fields.keys())
@@ -906,8 +928,10 @@ def upsert_casino_config(user_id: int, **fields) -> None:
             sets.append(f"{k} = ?")
             vals.append(v)
         vals.append(int(user_id))
-        conn.execute(f"UPDATE casino_config SET {','.join(sets)} WHERE user_id = ?",
-                     vals)
+        conn.execute(
+            f"UPDATE casino_config SET {','.join(sets)} WHERE user_id = ?",
+            vals,
+        )
 
 
 def list_casino_enabled() -> List[dict]:
@@ -994,18 +1018,21 @@ def casino_stats(user_id: int) -> dict:
              SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
              SUM(CASE WHEN result = 'lose' THEN 1 ELSE 0 END) AS losses,
              SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes,
-             COALESCE(SUM(profit), 0) AS profit
+             COALESCE(SUM(profit), 0) AS profit,
+             COALESCE(SUM(bet_amount), 0) AS invested
            FROM casino_runs WHERE user_id = ?""",
         (int(user_id),),
     ).fetchone()
     if not row:
-        return {"total": 0, "wins": 0, "losses": 0, "pushes": 0, "profit": 0}
+        return {"total": 0, "wins": 0, "losses": 0, "pushes": 0,
+                "profit": 0, "invested": 0}
     return {
         "total": int(row["total"] or 0),
         "wins": int(row["wins"] or 0),
         "losses": int(row["losses"] or 0),
         "pushes": int(row["pushes"] or 0),
         "profit": int(row["profit"] or 0),
+        "invested": int(row["invested"] or 0),
     }
 
 
@@ -1017,7 +1044,8 @@ def add_casino_log(user_id: int, chat_id: int, level: str, message: str,
     _ensure_ready()
     conn = get_conn()
     conn.execute(
-        """INSERT INTO casino_logs (user_id, chat_id, level, message, extra, created_at)
+        """INSERT INTO casino_logs
+           (user_id, chat_id, level, message, extra, created_at)
            VALUES (?,?,?,?,?,?)""",
         (int(user_id), int(chat_id or 0), level,
          (message or "")[:500], (extra or "")[:500],
