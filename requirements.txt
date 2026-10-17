@@ -15,4 +15,6 @@ qrcode
 pillow
 pytest
 cryptography
-
+weasyprint>=60.0
+jinja2>=3.1
+xhtml2pdf>=0.2.11

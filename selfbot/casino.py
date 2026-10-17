@@ -426,7 +426,7 @@ def _parse_multipliers(cfg: dict) -> list:
 
 
 # ===========================================================================
-# Profile parser
+# Profile parser — ROBUST VERSION
 # ===========================================================================
 _PROFILE_RE = re.compile(
     r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*([ᴍᴋɢʙmkbg])",
@@ -444,56 +444,122 @@ _CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.I
 
 
 def parse_profile(text: str) -> Optional[dict]:
+    """Parse Meowie profile using robust substring search.
+
+    Works with various formats of the Meowie profile reply, which uses
+    unicode small-caps characters and may have encoding variations.
+    """
     if not text:
         return None
+
     out = {}
 
-    m = _PROFILE_RE.search(text)
-    if m:
-        pts = _parse_profile_value(m.group(1), m.group(2))
-        if pts is not None:
-            out["meow_points"] = int(pts)
+    # ---------------------------------------------------------------
+    # Meow Points
+    # ---------------------------------------------------------------
+    for marker in ("ᴍᴇᴏᴡ ᴘᴏɪɴᴛꜱ", "ᴍᴇᴏᴡ ᴘᴏɪɴᴛs",
+                   "MEOW POINTS", "Meow Points",
+                   "meow points", "Meow_Points", "meow_points"):
+        idx = text.find(marker)
+        if idx >= 0:
+            chunk = text[idx + len(marker):idx + len(marker) + 80]
+            m = re.search(
+                r"[:：]?\s*([0-9]+(?:[.,][0-9]+)?)\s*([ᴍᴋɢʙmkbg]?)",
+                chunk,
+            )
+            if m:
+                val = _parse_profile_value(m.group(1), m.group(2))
+                if val is not None:
+                    out["meow_points"] = int(val)
+            break
 
-    m = _LEVEL_RE.search(text)
-    if m:
-        try:
-            out["level"] = int(m.group(1))
-        except ValueError:
-            pass
+    # ---------------------------------------------------------------
+    # Level
+    # ---------------------------------------------------------------
+    for marker in ("ʟᴇᴠᴇʟ", "LEVEL", "Level", "level"):
+        idx = text.find(marker)
+        if idx >= 0:
+            chunk = text[idx + len(marker):idx + len(marker) + 40]
+            m = re.search(r"[:：]?\s*([0-9]+)", chunk)
+            if m:
+                try:
+                    out["level"] = int(m.group(1))
+                except ValueError:
+                    pass
+            break
 
-    m = _EXP_RE.search(text)
-    if m:
-        try:
-            cur_val = float(m.group(1).replace(",", "."))
-            cur_suffix = (m.group(2) or "").lower()
-            if cur_suffix in ("ᴋ", "k"):
-                cur_val *= 1000
-            elif cur_suffix in ("ᴍ", "m"):
-                cur_val *= 1_000_000
-            elif cur_suffix in ("ɢ", "g", "ʙ", "b"):
-                cur_val *= 1_000_000_000
-            out["exp_current"] = int(cur_val)
-        except (ValueError, TypeError):
-            pass
-        try:
-            need_val = float(m.group(3).replace(",", "."))
-            need_suffix = (m.group(4) or "").lower()
-            if need_suffix in ("ᴋ", "k"):
-                need_val *= 1000
-            elif need_suffix in ("ᴍ", "m"):
-                need_val *= 1_000_000
-            elif need_suffix in ("ɢ", "g", "ʙ", "b"):
-                need_val *= 1_000_000_000
-            out["exp_needed"] = int(need_val)
-        except (ValueError, TypeError):
-            pass
+    # ---------------------------------------------------------------
+    # EXP — try multiple patterns
+    # ---------------------------------------------------------------
+    exp_patterns = (
+        # X<suffix> / Y<suffix> (any separator)
+        r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)\s*[/\-|❱›→]\s*"
+        r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)",
+        # X<suffix> / Y<suffix> (no space around /)
+        r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)\s*/\s*"
+        r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)",
+    )
 
-    m = _CATS_RE.search(text)
-    if m:
-        try:
-            out["street_cats"] = int(m.group(1))
-        except ValueError:
-            pass
+    for pat in exp_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if not m:
+            continue
+
+        groups = m.groups()
+
+        if len(groups) == 4:
+            try:
+                cur_val = float(groups[0].replace(",", "."))
+                suffix = (groups[1] or "").lower()
+                if suffix in ("ᴋ", "k"):
+                    cur_val *= 1000
+                elif suffix in ("ᴍ", "m"):
+                    cur_val *= 1_000_000
+                elif suffix in ("ɢ", "g", "ʙ", "b"):
+                    cur_val *= 1_000_000_000
+                out["exp_current"] = int(cur_val)
+            except (ValueError, TypeError):
+                pass
+
+            try:
+                need_val = float(groups[2].replace(",", "."))
+                suffix = (groups[3] or "").lower()
+                if suffix in ("ᴋ", "k"):
+                    need_val *= 1000
+                elif suffix in ("ᴍ", "m"):
+                    need_val *= 1_000_000
+                elif suffix in ("ɢ", "g", "ʙ", "b"):
+                    need_val *= 1_000_000_000
+                out["exp_needed"] = int(need_val)
+            except (ValueError, TypeError):
+                pass
+
+            break
+
+        elif len(groups) == 2:
+            cur = _parse_human_number(groups[0])
+            need = _parse_human_number(groups[1])
+            if cur is not None:
+                out["exp_current"] = int(cur)
+            if need is not None:
+                out["exp_needed"] = int(need)
+            break
+
+    # ---------------------------------------------------------------
+    # Street Cats
+    # ---------------------------------------------------------------
+    for marker in ("ꜱᴛʀᴇᴇᴛ ᴄᴀᴛꜱ", "ꜱᴛʀᴇᴇᴛ ᴄᴀᴛs",
+                   "STREET CATS", "Street Cats", "street cats"):
+        idx = text.find(marker)
+        if idx >= 0:
+            chunk = text[idx + len(marker):idx + len(marker) + 30]
+            m = re.search(r"[:：]\s*([0-9]+)", chunk)
+            if m:
+                try:
+                    out["street_cats"] = int(m.group(1))
+                except ValueError:
+                    pass
+            break
 
     return out or None
 
@@ -778,7 +844,7 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     if bet != int(cfg["current_bet"]):
         save_config(user_id, current_bet=bet)
 
-    # peak_bet فوراً آپدیت شود (حتی قبل از بازی)
+    # peak_bet فوراً آپدیت شود
     if bet > int(cfg.get("peak_bet", 0) or 0):
         save_config(user_id, peak_bet=bet)
         log_bot.info(f"casino: [peak] updated peak_bet={bet} (before play)")

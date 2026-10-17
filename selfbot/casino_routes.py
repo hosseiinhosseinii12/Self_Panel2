@@ -2,18 +2,19 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 from flask import (flash, redirect, render_template_string, request,
-                   url_for)
+                   Response, url_for)
 
 from .audit import record as audit_record
 from .config import CONFIG
 from .logging_setup import log_flask
 from . import casino as CAS
 from . import casino_panel as CP
+from . import casino_export as EXP
 from . import db
 
 
 # ===========================================================================
-# Tehran timezone helper
+# Tehran timezone helpers
 # ===========================================================================
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
@@ -33,7 +34,6 @@ def _to_tehran(iso_str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
         try:
             dt = datetime.fromisoformat(s)
         except Exception:
-            # Fallback: take first 19 chars (already a time-ish string)
             return str(iso_str)[:19] or "—"
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -43,7 +43,6 @@ def _to_tehran(iso_str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 
 
 def _enrich_cfg_times(cfg: dict) -> dict:
-    """Add _tehran variants for all time fields in a cfg dict (in-place)."""
     cfg["last_run_tehran"] = _to_tehran(cfg.get("last_run", ""))
     cfg["next_run_tehran"] = _to_tehran(cfg.get("next_run", ""))
     cfg["last_meow_tehran"] = _to_tehran(cfg.get("last_meow", ""))
@@ -52,7 +51,6 @@ def _enrich_cfg_times(cfg: dict) -> dict:
 
 
 def _enrich_runs(runs: list) -> list:
-    """Add _tehran variants for all time fields in a runs list (in-place)."""
     for r in runs:
         r["started_at_tehran"] = _to_tehran(r.get("started_at", ""))
         r["finished_at_tehran"] = _to_tehran(r.get("finished_at", ""))
@@ -60,10 +58,22 @@ def _enrich_runs(runs: list) -> list:
 
 
 def _enrich_logs(logs: list) -> list:
-    """Add _tehran variants for all time fields in a logs list (in-place)."""
     for l in logs:
         l["created_at_tehran"] = _to_tehran(l.get("created_at", ""))
     return logs
+
+
+def _compute_filter_counts(runs: list) -> dict:
+    """Count runs per filter mode for display on the export page."""
+    return {
+        "all": len(runs),
+        "win": len(EXP.filter_runs(runs, "win")),
+        "lose": len(EXP.filter_runs(runs, "lose")),
+        "push": len(EXP.filter_runs(runs, "push")),
+        "win_lose": len(EXP.filter_runs(runs, "win_lose")),
+        "win_push": len(EXP.filter_runs(runs, "win_push")),
+        "lose_push": len(EXP.filter_runs(runs, "lose_push")),
+    }
 
 
 # ===========================================================================
@@ -86,7 +96,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         runs = db.list_casino_runs(uid, limit=30)
         logs = db.list_casino_logs(uid, limit=30)
 
-        # Convert all times to Tehran for display
         _enrich_cfg_times(cfg)
         _enrich_runs(runs)
         _enrich_logs(logs)
@@ -269,6 +278,66 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         flash(f"Deleted {n} runs.")
         return redirect(url_for("casino_page"))
 
+    # -------------------- Export: HTML + PDF --------------------
+    @app.route("/admin/casino/export", methods=["GET"])
+    @login_required
+    def casino_export_page():
+        uid = _owner_id()
+        filter_mode = request.args.get("filter", "all")
+        all_runs = db.list_casino_runs(uid, limit=500)
+        counts = _compute_filter_counts(all_runs)
+
+        body = render_template_string(
+            CP.CASINO_EXPORT_TEMPLATE,
+            filter_mode=filter_mode,
+            counts=counts,
+            csrf=csrf_token(),
+            back_url=url_for("casino_page"),
+        )
+        return render_page("Export Logs", body, "casino")
+
+    @app.route("/admin/casino/export/html", methods=["GET"])
+    @login_required
+    def casino_export_html():
+        uid = _owner_id()
+        filter_mode = request.args.get("filter", "all")
+        try:
+            html = EXP.render_html(uid, filter_mode, limit=500)
+        except Exception as e:
+            log_flask.error(f"HTML export failed: {e}")
+            return f"HTML export failed: {e}", 500
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"casino-log-{filter_mode}-{ts}.html"
+        return Response(
+            html,
+            mimetype="text/html",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
+
+    @app.route("/admin/casino/export/pdf", methods=["GET"])
+    @login_required
+    def casino_export_pdf():
+        uid = _owner_id()
+        filter_mode = request.args.get("filter", "all")
+        try:
+            pdf_bytes = EXP.render_pdf(uid, filter_mode, limit=500)
+        except Exception as e:
+            log_flask.error(f"PDF export failed: {e}")
+            return f"PDF export failed: {e}", 500
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"casino-log-{filter_mode}-{ts}.pdf"
+        return Response(
+            pdf_bytes,
+            mimetype="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
+
 
 # ===========================================================================
 # User routes
@@ -288,7 +357,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         stats = db.casino_stats(uid)
         runs = db.list_casino_runs(uid, limit=30)
 
-        # Convert all times to Tehran for display
         _enrich_cfg_times(cfg)
         _enrich_runs(runs)
 
@@ -427,3 +495,63 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         n = db.clear_casino_runs(uid)
         flash(f"Deleted {n} runs.")
         return redirect(url_for("user.casino_page"))
+
+    # -------------------- Export: HTML + PDF --------------------
+    @bp.route("/casino/export", methods=["GET"])
+    @login_required
+    def casino_export_page():
+        uid = get_uid()
+        filter_mode = request.args.get("filter", "all")
+        all_runs = db.list_casino_runs(uid, limit=500)
+        counts = _compute_filter_counts(all_runs)
+
+        body = render_template_string(
+            CP.CASINO_EXPORT_TEMPLATE,
+            filter_mode=filter_mode,
+            counts=counts,
+            csrf=csrf_token(),
+            back_url=url_for("user.casino_page"),
+        )
+        return render_layout("Export Logs", body, "casino")
+
+    @bp.route("/casino/export/html", methods=["GET"])
+    @login_required
+    def casino_export_html():
+        uid = get_uid()
+        filter_mode = request.args.get("filter", "all")
+        try:
+            html = EXP.render_html(uid, filter_mode, limit=500)
+        except Exception as e:
+            log_flask.error(f"HTML export failed: {e}")
+            return f"HTML export failed: {e}", 500
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"casino-log-{filter_mode}-{ts}.html"
+        return Response(
+            html,
+            mimetype="text/html",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
+
+    @bp.route("/casino/export/pdf", methods=["GET"])
+    @login_required
+    def casino_export_pdf():
+        uid = get_uid()
+        filter_mode = request.args.get("filter", "all")
+        try:
+            pdf_bytes = EXP.render_pdf(uid, filter_mode, limit=500)
+        except Exception as e:
+            log_flask.error(f"PDF export failed: {e}")
+            return f"PDF export failed: {e}", 500
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"casino-log-{filter_mode}-{ts}.pdf"
+        return Response(
+            pdf_bytes,
+            mimetype="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
