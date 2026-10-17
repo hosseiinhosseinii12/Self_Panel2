@@ -45,7 +45,6 @@ def _to_tehran(iso_str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 def _enrich_cfg_times(cfg: dict) -> dict:
     cfg["last_run_tehran"] = _to_tehran(cfg.get("last_run", ""))
     cfg["next_run_tehran"] = _to_tehran(cfg.get("next_run", ""))
-    cfg["last_meow_tehran"] = _to_tehran(cfg.get("last_meow", ""))
     cfg["profile_updated_tehran"] = _to_tehran(cfg.get("profile_updated", ""))
     return cfg
 
@@ -140,12 +139,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         except ValueError:
             interval = CAS.DEFAULT_INTERVAL
 
-        try:
-            meow_interval = int(request.form.get("meow_interval", "600"))
-            meow_interval = max(60, meow_interval)
-        except ValueError:
-            meow_interval = 600
-
         mults = (request.form.get("multipliers") or "1.5,2,2.5,3").strip()
         strategy = request.form.get("strategy_mode", "martingale")
         if strategy not in ("martingale", "flat"):
@@ -158,7 +151,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             max_bet=max_bet,
             max_allowed_bet=max_bet,
             bet_interval=interval,
-            meow_interval=meow_interval,
             multipliers=mults,
             strategy_mode=strategy,
         )
@@ -181,7 +173,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
                      admin_name=current_admin_name(),
                      meta={"chat_id": chat_id, "initial": initial,
                            "interval": interval,
-                           "meow_interval": meow_interval,
                            "max_bet": max_bet,
                            "multipliers": mults})
         flash("Casino configuration saved.")
@@ -416,15 +407,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
             interval = cfg["bet_interval"]
         if interval != cfg["bet_interval"]:
             fields["bet_interval"] = interval
-
-        try:
-            meow_interval = int(request.form.get(
-                "meow_interval", str(cfg.get("meow_interval", 600))))
-            meow_interval = max(60, meow_interval)
-        except ValueError:
-            meow_interval = cfg.get("meow_interval", 600)
-        if meow_interval != cfg.get("meow_interval", 600):
-            fields["meow_interval"] = meow_interval
 
         mults = (request.form.get("multipliers") or "").strip()
         if mults and mults != cfg.get("multipliers", ""):
