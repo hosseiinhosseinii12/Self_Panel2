@@ -1,4 +1,8 @@
-﻿"""HTML templates for the Casino automator panel (admin + user)."""
+﻿"""HTML templates for the Casino automator panel (admin + user).
+
+All datetimes use the `| tehran` filter (installed in casino_routes.py)
+to convert UTC -> Tehran (UTC+3:30) for display.
+"""
 
 
 # ===========================================================================
@@ -55,7 +59,7 @@ CASINO_ADMIN_TEMPLATE = r"""
   </div>
   {% if cfg.profile_updated %}
   <div class="muted mt-2" style="font-size:12px">
-    Last updated: {{ cfg.profile_updated[:19] }}
+    Last updated: {{ cfg.profile_updated | tehran }} (Tehran)
   </div>
   {% else %}
   <div class="muted mt-2" style="font-size:12px">
@@ -128,7 +132,7 @@ CASINO_ADMIN_TEMPLATE = r"""
         <div>
           <label>Meow interval (seconds, ≥ 60)</label>
           <input type="number" name="meow_interval"
-                 value="{{ cfg.meow_interval | default(600) }}" min="60">
+                 value="{{ cfg.meow_interval }}" min="60">
         </div>
       </div>
 
@@ -141,7 +145,7 @@ CASINO_ADMIN_TEMPLATE = r"""
       <select name="strategy_mode">
         <option value="martingale"
                 {% if cfg.strategy_mode == 'martingale' %}selected{% endif %}>
-          Martingale v2 (×3 on 0x / 0.5x, repeat on 1x, reset on win)
+          Martingale v2 (x3 on 0x / 0.5x, repeat on 1x, reset on win)
         </option>
         <option value="flat"
                 {% if cfg.strategy_mode == 'flat' %}selected{% endif %}>
@@ -151,7 +155,7 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
-        0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
+        0x / 0.5x -&gt; x3 &middot; 1x -&gt; repeat &middot; win (&gt;=1.5x) -&gt; reset to initial.<br>
         Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
         <strong>میوهام</strong> is sent every <code>meow_interval</code> seconds,
         15s before <strong>Casino</strong>.
@@ -221,12 +225,12 @@ CASINO_ADMIN_TEMPLATE = r"""
                 <td class="mono text-right" style="color:var(--red)">
                   {{ '{:+,}'.format(cfg.total_lost) }}
                 </td></tr>
-            <tr><td class="muted">Last run</td>
-                <td class="mono text-right">{{ cfg.last_run[:19] or '—' }}</td></tr>
-            <tr><td class="muted">Next run</td>
-                <td class="mono text-right">{{ cfg.next_run[:19] or '—' }}</td></tr>
-            <tr><td class="muted">Last "میوهام"</td>
-                <td class="mono text-right">{{ cfg.last_meow[:19] or '—' }}</td></tr>
+            <tr><td class="muted">Last run (Tehran)</td>
+                <td class="mono text-right">{{ cfg.last_run | tehran }}</td></tr>
+            <tr><td class="muted">Next run (Tehran)</td>
+                <td class="mono text-right">{{ cfg.next_run | tehran }}</td></tr>
+            <tr><td class="muted">Last "میوهام" (Tehran)</td>
+                <td class="mono text-right">{{ cfg.last_meow | tehran }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -251,14 +255,14 @@ CASINO_ADMIN_TEMPLATE = r"""
     <table>
       <thead>
         <tr>
-          <th>When</th><th>Bet</th><th>Result</th><th>Mult</th>
+          <th>When (Tehran)</th><th>Bet</th><th>Result</th><th>Mult</th>
           <th>Score</th><th class="text-right">Profit</th>
         </tr>
       </thead>
       <tbody>
       {% for r in runs %}
       <tr>
-        <td class="mono muted">{{ r.started_at[:19] }}</td>
+        <td class="mono muted">{{ r.started_at | tehran }}</td>
         <td class="mono">{{ '{:,}'.format(r.bet_amount) }}</td>
         <td>
           {% if r.result == 'win' %}<span class="badge green">win</span>
@@ -276,7 +280,7 @@ CASINO_ADMIN_TEMPLATE = r"""
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="empty"><div class="empty-icon">ðŸŽ°</div>No runs yet</td></tr>
+      <tr><td colspan="6" class="empty"><div class="empty-icon">🎰</div>No runs yet</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -289,12 +293,12 @@ CASINO_ADMIN_TEMPLATE = r"""
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>When</th><th>Level</th><th>Message</th></tr>
+        <tr><th>When (Tehran)</th><th>Level</th><th>Message</th></tr>
       </thead>
       <tbody>
       {% for l in logs %}
       <tr>
-        <td class="mono muted">{{ l.created_at[:19] }}</td>
+        <td class="mono muted">{{ l.created_at | tehran }}</td>
         <td>
           {% if l.level == 'error' %}<span class="badge red">error</span>
           {% elif l.level == 'warn' %}<span class="badge amber">warn</span>
@@ -366,7 +370,7 @@ CASINO_USER_TEMPLATE = r"""
   </div>
   {% if cfg.profile_updated %}
   <div class="muted mt-2" style="font-size:12px">
-    Last updated: {{ cfg.profile_updated[:19] }}
+    Last updated: {{ cfg.profile_updated | tehran }} (Tehran)
   </div>
   {% else %}
   <div class="muted mt-2" style="font-size:12px">
@@ -436,7 +440,7 @@ CASINO_USER_TEMPLATE = r"""
         <div>
           <label>Meow interval (seconds, ≥ 60)</label>
           <input type="number" name="meow_interval"
-                 value="{{ cfg.meow_interval | default(600) }}" min="60">
+                 value="{{ cfg.meow_interval }}" min="60">
         </div>
         <div>
           <label>Winning multipliers (comma-separated)</label>
@@ -448,7 +452,7 @@ CASINO_USER_TEMPLATE = r"""
 
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
-        0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
+        0x / 0.5x -&gt; x3 &middot; 1x -&gt; repeat &middot; win (&gt;=1.5x) -&gt; reset to initial.<br>
         Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
         <strong>میوهام</strong> is sent every <code>meow_interval</code> seconds,
         15s before <strong>Casino</strong>.
@@ -492,8 +496,8 @@ CASINO_USER_TEMPLATE = r"""
                 <td class="mono text-right">
                   {{ cfg.current_streak }} ({{ cfg.best_streak }})
                 </td></tr>
-            <tr><td class="muted">Next run</td>
-                <td class="mono text-right">{{ cfg.next_run[:19] or '—' }}</td></tr>
+            <tr><td class="muted">Next run (Tehran)</td>
+                <td class="mono text-right">{{ cfg.next_run | tehran }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -518,14 +522,14 @@ CASINO_USER_TEMPLATE = r"""
     <table>
       <thead>
         <tr>
-          <th>When</th><th>Bet</th><th>Result</th><th>Mult</th>
+          <th>When (Tehran)</th><th>Bet</th><th>Result</th><th>Mult</th>
           <th class="text-right">Profit</th>
         </tr>
       </thead>
       <tbody>
       {% for r in runs %}
       <tr>
-        <td class="mono muted">{{ r.started_at[:19] }}</td>
+        <td class="mono muted">{{ r.started_at | tehran }}</td>
         <td class="mono">{{ '{:,}'.format(r.bet_amount) }}</td>
         <td>
           {% if r.result == 'win' %}<span class="badge green">win</span>
@@ -542,7 +546,7 @@ CASINO_USER_TEMPLATE = r"""
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="5" class="empty"><div class="empty-icon">ðŸŽ°</div>No runs yet</td></tr>
+      <tr><td colspan="5" class="empty"><div class="empty-icon">🎰</div>No runs yet</td></tr>
       {% endfor %}
       </tbody>
     </table>

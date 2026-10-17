@@ -1,5 +1,6 @@
 """Admin + user routes for the Casino automator."""
 import asyncio
+from datetime import datetime, timezone, timedelta
 from flask import (flash, redirect, render_template_string, request,
                    url_for)
 
@@ -12,12 +13,45 @@ from . import db
 
 
 # ===========================================================================
+# Tehran timezone helper
+# ===========================================================================
+TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
+
+def _to_tehran(iso_str: str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """Convert an ISO8601 UTC string to Tehran local time for display."""
+    if not iso_str:
+        return "—"
+    s = str(iso_str).strip()
+    if not s:
+        return "—"
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return str(iso_str)[:19] or "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TEHRAN_TZ).strftime(fmt)
+
+
+def _install_jinja_filters(target):
+    """Install the `tehran` filter on a Flask app or blueprint."""
+    try:
+        target.jinja_env.filters["tehran"] = _to_tehran
+    except Exception as e:
+        log_flask.warning(f"could not install tehran filter: {e}")
+
+
+# ===========================================================================
 # Admin routes
 # ===========================================================================
 def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
                                  render_page, get_runtime_safe,
                                  current_admin_id, current_admin_name):
     """Register casino routes for the admin panel."""
+    _install_jinja_filters(app)
 
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
@@ -42,7 +76,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         csrf_check()
         uid = _owner_id()
 
-        # ---- chat_id ----
         chat_raw = (request.form.get("chat_id") or "").strip()
         chat_id = None
         if chat_raw:
@@ -52,14 +85,12 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
                 flash("Invalid chat ID.", "error")
                 return redirect(url_for("casino_page"))
 
-        # ---- initial bet ----
         try:
             initial = int(request.form.get("initial_bet", "100000"))
             initial = max(CAS.MIN_BET, min(CAS.MAX_BET, initial))
         except ValueError:
             initial = CAS.START_BET
 
-        # ---- max bet (hard-capped) ----
         try:
             max_bet = int(request.form.get("max_bet", str(CAS.MAX_BET)))
             max_bet = max(initial, max_bet)
@@ -67,14 +98,12 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             max_bet = CAS.MAX_BET
         max_bet = min(max_bet, CAS.MAX_BET)
 
-        # ---- bet interval ----
         try:
             interval = int(request.form.get("bet_interval", "301"))
             interval = max(60, interval)
         except ValueError:
             interval = CAS.DEFAULT_INTERVAL
 
-        # ---- meow interval ----
         try:
             meow_interval = int(request.form.get("meow_interval", "600"))
             meow_interval = max(60, meow_interval)
@@ -215,15 +244,12 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
 
 
 # ===========================================================================
-# User routes (registered on the user blueprint)
+# User routes
 # ===========================================================================
 def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
                                 render_layout, get_uid):
-    """Register casino routes on the user blueprint.
-
-    `render_layout` is a callable: render_layout(title, body, active) -> HTML
-    `get_uid` returns the current user id (or None).
-    """
+    """Register casino routes on the user blueprint."""
+    _install_jinja_filters(bp)
 
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
@@ -260,7 +286,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
 
         fields = {}
 
-        # ---- chat_id (admin only) ----
         if is_admin:
             chat_raw = (request.form.get("chat_id") or "").strip()
             if chat_raw:
@@ -273,7 +298,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
                     flash("Invalid chat ID.", "error")
                     return redirect(url_for("user.casino_page"))
 
-        # ---- initial bet ----
         try:
             initial = int(request.form.get(
                 "initial_bet", str(cfg["initial_bet"])))
@@ -286,7 +310,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
             fields["current_bet"] = initial
             fields["peak_bet"] = initial
 
-        # ---- bet interval ----
         try:
             interval = int(request.form.get(
                 "bet_interval", str(cfg["bet_interval"])))
@@ -296,7 +319,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         if interval != cfg["bet_interval"]:
             fields["bet_interval"] = interval
 
-        # ---- meow interval ----
         try:
             meow_interval = int(request.form.get(
                 "meow_interval", str(cfg.get("meow_interval", 600))))
@@ -306,7 +328,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         if meow_interval != cfg.get("meow_interval", 600):
             fields["meow_interval"] = meow_interval
 
-        # ---- multipliers ----
         mults = (request.form.get("multipliers") or "").strip()
         if mults and mults != cfg.get("multipliers", ""):
             fields["multipliers"] = mults
