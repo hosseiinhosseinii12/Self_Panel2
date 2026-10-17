@@ -1,4 +1,7 @@
-﻿"""HTML templates for the Casino automator panel (admin + user + export)."""
+﻿"""HTML templates for the Casino automator panel (admin + user + export).
+
+No meow/meowie-profile cards. Only Casino UI + Export page.
+"""
 
 
 # ===========================================================================
@@ -25,44 +28,6 @@ CASINO_ADMIN_TEMPLATE = r"""
     <div class="flash {{ 'err' if cat=='error' else '' }}">{{ msg }}</div>
   {% endfor %}
 {% endwith %}
-
-<!-- ======================= Meowie profile ======================= -->
-<div class="card">
-  <h2>Meowie profile <span class="sub">parsed from replies</span></h2>
-  <div class="stats" style="margin-bottom:0">
-    <div class="stat">
-      <div class="k">Meow Points</div>
-      <div class="v" style="font-size:22px">
-        {{ '{:,.2f}'.format(cfg.meow_points / 1000000) }}<small>M</small>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="k">Level</div>
-      <div class="v" style="font-size:22px">{{ cfg.level }}</div>
-    </div>
-    <div class="stat">
-      <div class="k">Level EXP</div>
-      <div class="v" style="font-size:17px">
-        {{ '{:,.2f}'.format(cfg.exp_current / 1000) }}k
-        /
-        {{ '{:,.2f}'.format(cfg.exp_needed / 1000) }}k
-      </div>
-    </div>
-    <div class="stat">
-      <div class="k">Street Cats</div>
-      <div class="v" style="font-size:22px">{{ cfg.street_cats }}</div>
-    </div>
-  </div>
-  {% if cfg.profile_updated_tehran and cfg.profile_updated_tehran != '—' %}
-  <div class="muted mt-2" style="font-size:12px">
-    Last updated: {{ cfg.profile_updated_tehran }} (Tehran)
-  </div>
-  {% else %}
-  <div class="muted mt-2" style="font-size:12px">
-    No profile reply received yet.
-  </div>
-  {% endif %}
-</div>
 
 <!-- ======================= Stats ======================= -->
 <div class="stats">
@@ -332,44 +297,6 @@ CASINO_USER_TEMPLATE = r"""
     <div class="flash {{ 'err' if cat=='error' else '' }}">{{ msg }}</div>
   {% endfor %}
 {% endwith %}
-
-<!-- ======================= Meowie profile ======================= -->
-<div class="card">
-  <h2>My Meowie profile <span class="sub">parsed from replies</span></h2>
-  <div class="stats" style="margin-bottom:0">
-    <div class="stat">
-      <div class="k">Meow Points</div>
-      <div class="v" style="font-size:22px">
-        {{ '{:,.2f}'.format(cfg.meow_points / 1000000) }}<small>M</small>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="k">Level</div>
-      <div class="v" style="font-size:22px">{{ cfg.level }}</div>
-    </div>
-    <div class="stat">
-      <div class="k">Level EXP</div>
-      <div class="v" style="font-size:17px">
-        {{ '{:,.2f}'.format(cfg.exp_current / 1000) }}k
-        /
-        {{ '{:,.2f}'.format(cfg.exp_needed / 1000) }}k
-      </div>
-    </div>
-    <div class="stat">
-      <div class="k">Street Cats</div>
-      <div class="v" style="font-size:22px">{{ cfg.street_cats }}</div>
-    </div>
-  </div>
-  {% if cfg.profile_updated_tehran and cfg.profile_updated_tehran != '—' %}
-  <div class="muted mt-2" style="font-size:12px">
-    Last updated: {{ cfg.profile_updated_tehran }} (Tehran)
-  </div>
-  {% else %}
-  <div class="muted mt-2" style="font-size:12px">
-    Send the Meowie profile reply once so the bot can parse it.
-  </div>
-  {% endif %}
-</div>
 
 <!-- ======================= Stats ======================= -->
 <div class="stats">

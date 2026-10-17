@@ -1,4 +1,7 @@
-"""Admin + user routes for the Casino automator."""
+"""Admin + user routes for the Casino automator.
+
+No meow/meowie-profile references. Times shown in Tehran.
+"""
 import asyncio
 from datetime import datetime, timezone, timedelta
 from flask import (flash, redirect, render_template_string, request,
@@ -45,7 +48,6 @@ def _to_tehran(iso_str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 def _enrich_cfg_times(cfg: dict) -> dict:
     cfg["last_run_tehran"] = _to_tehran(cfg.get("last_run", ""))
     cfg["next_run_tehran"] = _to_tehran(cfg.get("next_run", ""))
-    cfg["profile_updated_tehran"] = _to_tehran(cfg.get("profile_updated", ""))
     return cfg
 
 

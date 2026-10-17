@@ -232,7 +232,7 @@ CREATE TABLE IF NOT EXISTS text_format_settings (
 );
 
 -- =====================================================================
--- Casino automator tables
+-- Casino automator tables (no meow/meowie-profile columns)
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS casino_config (
@@ -246,12 +246,10 @@ CREATE TABLE IF NOT EXISTS casino_config (
     max_allowed_bet INTEGER DEFAULT 5000000,
     min_bet INTEGER DEFAULT 1000,
     bet_interval INTEGER DEFAULT 301,
-    meow_interval INTEGER DEFAULT 600,
     multipliers TEXT DEFAULT '1.5,2,2.5,3',
     strategy_mode TEXT DEFAULT 'martingale',
     last_run TEXT DEFAULT '',
     next_run TEXT DEFAULT '',
-    last_meow TEXT DEFAULT '',
     total_plays INTEGER DEFAULT 0,
     total_wins INTEGER DEFAULT 0,
     total_losses INTEGER DEFAULT 0,
@@ -267,12 +265,6 @@ CREATE TABLE IF NOT EXISTS casino_config (
     last_result TEXT DEFAULT '',
     current_streak INTEGER DEFAULT 0,
     best_streak INTEGER DEFAULT 0,
-    meow_points INTEGER DEFAULT 0,
-    level INTEGER DEFAULT 0,
-    exp_current INTEGER DEFAULT 0,
-    exp_needed INTEGER DEFAULT 0,
-    street_cats INTEGER DEFAULT 0,
-    profile_updated TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
 
@@ -352,14 +344,6 @@ def init_db() -> None:
             "peak_balance": "INTEGER DEFAULT 0",
             "current_streak": "INTEGER DEFAULT 0",
             "best_streak": "INTEGER DEFAULT 0",
-            "last_meow": "TEXT DEFAULT ''",
-            "meow_interval": "INTEGER DEFAULT 600",
-            "meow_points": "INTEGER DEFAULT 0",
-            "level": "INTEGER DEFAULT 0",
-            "exp_current": "INTEGER DEFAULT 0",
-            "exp_needed": "INTEGER DEFAULT 0",
-            "street_cats": "INTEGER DEFAULT 0",
-            "profile_updated": "TEXT DEFAULT ''",
         }
         for col, decl in cwanted.items():
             if col not in ccols:
@@ -1026,7 +1010,6 @@ def list_casino_runs(user_id: int = None, limit: int = 100) -> List[dict]:
 
 
 def clear_casino_runs(user_id: int = None) -> int:
-    """Delete all casino runs (for one user or all). Returns count."""
     _ensure_ready()
     conn = get_conn()
     if user_id is not None:

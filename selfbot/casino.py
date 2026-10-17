@@ -1,4 +1,16 @@
-"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune."""
+"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
+
+Strategy (Martingale v2 — فقط روی 0x و 0.5x):
+  - Initial bet قابل ویرایش (پیش‌فرض 100,000)
+  - نتیجه 0x یا 0.5x  → bet = bet * 3
+  - نتیجه 1x          → bet = bet (تکرار)
+  - نتیجه برد (>=1.5) → bet = initial_bet
+  - سقف سخت: 5,000,000
+
+بدون هیچ چیزی مربوط به «میوهام» یا «Meowie profile».
+فقط با پیام Casino و پاسخ ربات کار می‌کند — بر اساس sender_id ربات
+و reply_to تصفیه می‌شود.
+"""
 import asyncio
 import random
 import re
@@ -25,12 +37,9 @@ except ImportError:
 # ===========================================================================
 CASINO_TRIGGER_TEXT = "Casino"
 EMOJI_TRIGGER = "🎰"
-MEOW_CALL_TEXT = "میوهام"
 
 DEFAULT_INTERVAL = 301
-MEOW_INTERVAL = 600
-MEOW_TO_CASINO_DELAY = 15.0
-GAME_TIMEOUT = 120.0
+GAME_TIMEOUT = 180.0
 POLL_INTERVAL = 1.5
 
 _INLINE_TYPES = (
@@ -50,13 +59,14 @@ MIN_BET = 1_000
 LOSS_MULTIPLIERS = (0.0, 0.5)
 PUSH_MULTIPLIERS = (1.0,)
 
-# Panel detection
+# Casino button patterns (must appear in the panel)
 CASINO_BUTTON_PATTERNS = (
     r"wheel", r"ᴄᴀꜱɪɴᴏ", r"casino", r"ꜱᴛᴀʀᴛ", r"ꜱᴘɪɴ",
     r"spin", r"start", r"gambling", r"ɢᴀᴍʙʟɪɴɢ",
     "🎰",
 )
 
+# Meowie buttons (must NOT appear)
 MEOW_BUTTON_PATTERNS = (
     r"feed", r"ꜰᴇᴇᴅ", r"play", r"ᴘʟᴀʏ", r"pet", r"ᴘᴇᴛ",
     r"ꜱᴛʀᴇᴇᴛ", r"street", r"ɪɴᴠᴇɴᴛᴏʀʏ", r"inventory",
@@ -90,41 +100,6 @@ def _round_down_to_cap(bet: int, cap: int = MAX_BET) -> int:
     if bet >= 1000:
         bet = (bet // 1000) * 1000
     return max(MIN_BET, bet)
-
-
-def _parse_human_number(s: str) -> Optional[float]:
-    if not s:
-        return None
-    s = s.strip().lower()
-    mult = 1.0
-    if s.endswith("ᴍ") or s.endswith("m"):
-        mult = 1_000_000.0
-        s = s[:-1]
-    elif s.endswith("ᴋ") or s.endswith("k"):
-        mult = 1_000.0
-        s = s[:-1]
-    elif s.endswith("ɢ") or s.endswith("g") or s.endswith("ʙ") or s.endswith("b"):
-        mult = 1_000_000_000.0
-        s = s[:-1]
-    try:
-        return float(s.replace(",", "").strip()) * mult
-    except ValueError:
-        return None
-
-
-def _parse_profile_value(num_str: str, suffix: str) -> Optional[float]:
-    try:
-        v = float((num_str or "").replace(",", ".").strip())
-    except ValueError:
-        return None
-    s = (suffix or "").strip().lower()
-    if s in ("ᴍ", "m"):
-        return v * 1_000_000
-    if s in ("ᴋ", "k"):
-        return v * 1_000
-    if s in ("ɢ", "g", "ʙ", "b"):
-        return v * 1_000_000_000
-    return v
 
 
 def _button_text(btn) -> str:
@@ -168,31 +143,62 @@ def _collect_button_texts(msg) -> list:
     return texts
 
 
-def _is_casino_panel(msg) -> bool:
-    """Return True only if msg looks like the Casino/Wheel panel."""
+def _get_reply_to(msg) -> Optional[int]:
+    """Extract reply_to_msg_id from a message safely."""
+    try:
+        rt = getattr(msg, "reply_to_msg_id", None)
+        if rt is not None:
+            return int(rt)
+        r = getattr(msg, "reply_to", None)
+        if r is not None:
+            rt = getattr(r, "reply_to_msg_id", None)
+            if rt is not None:
+                return int(rt)
+    except Exception:
+        pass
+    return None
+
+
+def _is_casino_panel(msg, expected_bot_id: Optional[int],
+                     reply_to_ids: tuple) -> bool:
+    """Return True ONLY if msg is the Casino panel that the Meowie bot
+    sent in reply to our 'Casino' trigger."""
     if not _msg_has_clickable(msg):
         return False
+    if bool(getattr(msg, "out", False)):
+        return False
+
     texts = _collect_button_texts(msg)
     if not texts:
         return False
     joined = " | ".join(texts)
 
+    # reject meow panel
     for pat in MEOW_BUTTON_PATTERNS:
         if re.search(pat, joined, re.IGNORECASE):
-            log_bot.info(
-                f"casino: [panel] skip msg={getattr(msg, 'id', '?')} "
-                f"(meow panel; buttons={texts[:4]})"
-            )
             return False
 
+    # must have casino buttons
+    has_casino_button = False
     for pat in CASINO_BUTTON_PATTERNS:
         if re.search(pat, joined, re.IGNORECASE):
-            return True
+            has_casino_button = True
+            break
+    if not has_casino_button and len(texts) < 4:
+        return False
 
-    if len(texts) >= 4:
-        return True
+    # sender check: must be the bot
+    sender_id = getattr(msg, "sender_id", None)
+    if expected_bot_id is not None and sender_id != expected_bot_id:
+        return False
 
-    return False
+    # reply_to check: either reply to our trigger OR no explicit reply
+    reply_to = _get_reply_to(msg)
+    if reply_to is not None and reply_to_ids:
+        if reply_to not in reply_to_ids:
+            return False
+
+    return True
 
 
 def _log_all_buttons(panel_msg, label: str = "") -> None:
@@ -362,12 +368,10 @@ def get_config(user_id: int) -> dict:
         "max_allowed_bet": int(c.get("max_allowed_bet", MAX_BET)),
         "min_bet": int(c.get("min_bet", MIN_BET)),
         "bet_interval": int(c.get("bet_interval", DEFAULT_INTERVAL)),
-        "meow_interval": int(c.get("meow_interval", MEOW_INTERVAL)),
         "multipliers": c.get("multipliers", "1.5,2,2.5,3"),
         "strategy_mode": c.get("strategy_mode", "martingale"),
         "last_run": c.get("last_run", ""),
         "next_run": c.get("next_run", ""),
-        "last_meow": c.get("last_meow", ""),
         "total_plays": int(c.get("total_plays", 0)),
         "total_wins": int(c.get("total_wins", 0)),
         "total_losses": int(c.get("total_losses", 0)),
@@ -384,12 +388,6 @@ def get_config(user_id: int) -> dict:
         "current_streak": int(c.get("current_streak", 0)),
         "best_streak": int(c.get("best_streak", 0)),
         "panel_msg_id": int(c.get("panel_msg_id", 0) or 0),
-        "meow_points": int(c.get("meow_points", 0) or 0),
-        "level": int(c.get("level", 0) or 0),
-        "exp_current": int(c.get("exp_current", 0) or 0),
-        "exp_needed": int(c.get("exp_needed", 0) or 0),
-        "street_cats": int(c.get("street_cats", 0) or 0),
-        "profile_updated": c.get("profile_updated", ""),
     }
 
 
@@ -416,10 +414,6 @@ def set_initial_bet(user_id: int, amount: int) -> None:
 
 def set_interval(user_id: int, seconds: int) -> None:
     save_config(user_id, bet_interval=max(60, int(seconds)))
-
-
-def set_meow_interval(user_id: int, seconds: int) -> None:
-    save_config(user_id, meow_interval=max(60, int(seconds)))
 
 
 def set_multipliers(user_id: int, mults: str) -> None:
@@ -481,135 +475,6 @@ def _parse_multipliers(cfg: dict) -> list:
 
 
 # ===========================================================================
-# Profile parser (robust, EXP only after LEVEL marker)
-# ===========================================================================
-_PROFILE_RE = re.compile(
-    r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*([ᴍᴋɢʙmkbg])",
-    re.IGNORECASE,
-)
-_LEVEL_RE = re.compile(
-    r"ʟᴇᴠᴇʟ\s*[:：]?\s*(\d+)",
-    re.IGNORECASE,
-)
-_CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.IGNORECASE)
-
-
-def parse_profile(text: str) -> Optional[dict]:
-    """Parse Meowie profile using robust substring search.
-
-    EXP is looked up ONLY after the LEVEL marker (since the profile
-    format always has:   ʟᴇᴠᴇʟ : 19 | 2.75ᴋ / 2.9ᴋ ▰▰▰▱▱)
-    """
-    if not text:
-        return None
-
-    out = {}
-
-    # ---------------------------------------------------------------
-    # Meow Points
-    # ---------------------------------------------------------------
-    for marker in ("ᴍᴇᴏᴡ ᴘᴏɪɴᴛꜱ", "ᴍᴇᴏᴡ ᴘᴏɪɴᴛs",
-                   "MEOW POINTS", "Meow Points",
-                   "meow points", "Meow_Points", "meow_points"):
-        idx = text.find(marker)
-        if idx >= 0:
-            chunk = text[idx + len(marker):idx + len(marker) + 80]
-            m = re.search(
-                r"[:：]?\s*([0-9]+(?:[.,][0-9]+)?)\s*([ᴍᴋɢʙmkbg]?)",
-                chunk,
-            )
-            if m:
-                val = _parse_profile_value(m.group(1), m.group(2))
-                if val is not None:
-                    out["meow_points"] = int(val)
-            break
-
-    # ---------------------------------------------------------------
-    # Level + EXP — find LEVEL marker once, use its chunk for both
-    # ---------------------------------------------------------------
-    level_chunk = ""
-    for marker in ("ʟᴇᴠᴇʟ", "LEVEL", "Level", "level"):
-        idx = text.find(marker)
-        if idx >= 0:
-            level_chunk = text[idx + len(marker):idx + len(marker) + 120]
-            break
-
-    if level_chunk:
-        # Level number (first integer after the marker)
-        m = re.search(r"[:：]?\s*([0-9]+)", level_chunk)
-        if m:
-            try:
-                out["level"] = int(m.group(1))
-            except ValueError:
-                pass
-
-        # EXP pair — search ONLY inside the level_chunk
-        exp_patterns = (
-            r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)\s*[/\-|❱›→]\s*"
-            r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)",
-            r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)\s*/\s*"
-            r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)",
-        )
-        for pat in exp_patterns:
-            m = re.search(pat, level_chunk, re.IGNORECASE)
-            if not m:
-                continue
-            groups = m.groups()
-            if len(groups) == 4:
-                try:
-                    cur_val = float(groups[0].replace(",", "."))
-                    suffix = (groups[1] or "").lower()
-                    if suffix in ("ᴋ", "k"):
-                        cur_val *= 1000
-                    elif suffix in ("ᴍ", "m"):
-                        cur_val *= 1_000_000
-                    elif suffix in ("ɢ", "g", "ʙ", "b"):
-                        cur_val *= 1_000_000_000
-                    out["exp_current"] = int(cur_val)
-                except (ValueError, TypeError):
-                    pass
-                try:
-                    need_val = float(groups[2].replace(",", "."))
-                    suffix = (groups[3] or "").lower()
-                    if suffix in ("ᴋ", "k"):
-                        need_val *= 1000
-                    elif suffix in ("ᴍ", "m"):
-                        need_val *= 1_000_000
-                    elif suffix in ("ɢ", "g", "ʙ", "b"):
-                        need_val *= 1_000_000_000
-                    out["exp_needed"] = int(need_val)
-                except (ValueError, TypeError):
-                    pass
-                break
-            elif len(groups) == 2:
-                cur = _parse_human_number(groups[0])
-                need = _parse_human_number(groups[1])
-                if cur is not None:
-                    out["exp_current"] = int(cur)
-                if need is not None:
-                    out["exp_needed"] = int(need)
-                break
-
-    # ---------------------------------------------------------------
-    # Street Cats
-    # ---------------------------------------------------------------
-    for marker in ("ꜱᴛʀᴇᴇᴛ ᴄᴀᴛꜱ", "ꜱᴛʀᴇᴇᴛ ᴄᴀᴛs",
-                   "STREET CATS", "Street Cats", "street cats"):
-        idx = text.find(marker)
-        if idx >= 0:
-            chunk = text[idx + len(marker):idx + len(marker) + 30]
-            m = re.search(r"[:：]\s*([0-9]+)", chunk)
-            if m:
-                try:
-                    out["street_cats"] = int(m.group(1))
-                except ValueError:
-                    pass
-            break
-
-    return out or None
-
-
-# ===========================================================================
 # State
 # ===========================================================================
 class CasinoState:
@@ -622,7 +487,6 @@ class CasinoState:
         self.bet_amount: int = 0
         self.lock = asyncio.Lock()
         self.cycle_lock = asyncio.Lock()
-        self.listener_installed: bool = False
 
 
 _STATES: dict = {}
@@ -635,78 +499,6 @@ def _get_state(user_id: int) -> CasinoState:
         st.user_id = int(user_id)
         _STATES[int(user_id)] = st
     return st
-
-
-# ===========================================================================
-# Listener
-# ===========================================================================
-def install_casino_listener(runtime, user_id: int, client) -> None:
-    if client is None:
-        return
-    if getattr(client, "_casino_listener_installed", False):
-        return
-
-    st = _get_state(user_id)
-
-    @client.on(events.NewMessage(incoming=True))
-    async def _on_new(event):
-        try:
-            text = event.raw_text or ""
-            _try_parse_profile(text)
-            if not _msg_has_clickable(event):
-                return
-            if not event.is_private and not event.is_group:
-                return
-            if st.chat_id and int(event.chat_id or 0) != int(st.chat_id):
-                return
-            st.last_panel_id = event.id
-            try:
-                save_config(user_id, panel_msg_id=event.id)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    @client.on(events.MessageEdited(incoming=True))
-    async def _on_edit(event):
-        try:
-            text = event.raw_text or ""
-            _try_parse_profile(text)
-            if not _msg_has_clickable(event):
-                return
-            if not event.is_private and not event.is_group:
-                return
-            if st.chat_id and int(event.chat_id or 0) != int(st.chat_id):
-                return
-            st.last_panel_id = event.id
-            try:
-                save_config(user_id, panel_msg_id=event.id)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    client._casino_listener_installed = True
-    st.listener_installed = True
-    log_bot.info(f"casino: listener installed uid={user_id}")
-
-
-def _try_parse_profile(text: str) -> None:
-    if not text:
-        return
-    low = text.lower()
-    if "ᴍᴇᴏᴡ" not in text and "meow" not in low:
-        return
-    parsed = parse_profile(text)
-    if not parsed:
-        return
-    try:
-        owner_id = int(CONFIG.get("owner_id", 338266658))
-        parsed["profile_updated"] = _now_iso()
-        save_config(owner_id, **parsed)
-        log_bot.info(f"casino: profile updated {parsed}")
-    except Exception as e:
-        log_bot.warning(f"casino: profile save failed: {e}")
 
 
 # ===========================================================================
@@ -754,60 +546,6 @@ def _schedule_next(user_id: int) -> None:
     save_config(user_id, last_run=_now_iso(), next_run=next_dt.isoformat())
 
 
-async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
-                            force: bool = False) -> bool:
-    chat_id = cfg.get("chat_id")
-    log_bot.info(
-        f"casino: [meow] check uid={user_id} force={force} "
-        f"chat_id={chat_id} last_meow={cfg.get('last_meow') or 'empty'}"
-    )
-
-    if not chat_id:
-        log_bot.warning(f"casino: [meow] no chat_id uid={user_id}")
-        return False
-
-    if not force:
-        last = cfg.get("last_meow") or ""
-        meow_interval = int(cfg.get("meow_interval", MEOW_INTERVAL))
-        now = datetime.now(dt_timezone.utc)
-        if last:
-            try:
-                last_dt = datetime.fromisoformat(last)
-                elapsed = (now - last_dt).total_seconds()
-                if elapsed < meow_interval:
-                    log_bot.info(
-                        f"casino: [meow] skip — last sent {elapsed:.0f}s ago "
-                        f"(< {meow_interval}s) uid={user_id}"
-                    )
-                    return False
-            except ValueError:
-                pass
-
-    client = runtime.user_clients.get(int(user_id))
-    if client is None:
-        log_bot.warning(f"casino: [meow] no client uid={user_id}")
-        return False
-
-    try:
-        log_bot.info(f"casino: [meow] sending '{MEOW_CALL_TEXT}' uid={user_id}")
-        await client.send_message(int(chat_id), MEOW_CALL_TEXT)
-        save_config(user_id, last_meow=_now_iso(), panel_msg_id=0)
-        try:
-            verify = get_config(user_id).get("last_meow", "")
-            log_bot.info(f"casino: [meow] verified last_meow={verify}")
-        except Exception:
-            pass
-        log_bot.info(
-            f"casino: [meow] SENT 'میوهام' uid={user_id} (force={force})"
-        )
-        return True
-    except Exception as e:
-        log_bot.warning(
-            f"casino: [meow] send failed: {type(e).__name__}: {e}"
-        )
-        return False
-
-
 # ===========================================================================
 # Cycle
 # ===========================================================================
@@ -831,58 +569,6 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
             f"casino: [cycle] no client uid={user_id}, aborting cycle"
         )
         return
-
-    try:
-        install_casino_listener(runtime, user_id, client)
-    except Exception:
-        pass
-
-    meow_interval = int(cfg.get("meow_interval", MEOW_INTERVAL))
-    last_meow = cfg.get("last_meow") or ""
-    force_meow = False
-    if not last_meow:
-        force_meow = True
-        log_bot.info(f"casino: [meow] first time — force uid={user_id}")
-    else:
-        try:
-            last_dt = datetime.fromisoformat(last_meow)
-            elapsed = (datetime.now(dt_timezone.utc) - last_dt).total_seconds()
-            if elapsed >= meow_interval:
-                force_meow = True
-                log_bot.info(
-                    f"casino: [meow] interval passed "
-                    f"({elapsed:.0f}s >= {meow_interval}s) — force uid={user_id}"
-                )
-            else:
-                log_bot.info(
-                    f"casino: [meow] skip — only {elapsed:.0f}s since last "
-                    f"(< {meow_interval}s) uid={user_id}"
-                )
-        except ValueError:
-            force_meow = True
-            log_bot.info(f"casino: [meow] invalid last_meow — force uid={user_id}")
-
-    meow_sent = False
-    try:
-        meow_sent = await _maybe_send_meow(runtime, user_id, cfg,
-                                            force=force_meow)
-    except Exception as e:
-        log_bot.warning(f"casino: meow before cycle failed: {e}")
-
-    if meow_sent:
-        log_bot.info(
-            f"casino: 'میوهام' sent (force={force_meow}), waiting "
-            f"{MEOW_TO_CASINO_DELAY:.0f}s before 'Casino' uid={user_id}"
-        )
-        try:
-            await asyncio.wait_for(
-                runtime.stop_event.wait(),
-                timeout=MEOW_TO_CASINO_DELAY,
-            )
-        except asyncio.TimeoutError:
-            pass
-        cfg = get_config(user_id)
-        chat_id = cfg["chat_id"]
 
     cap = min(int(cfg["max_allowed_bet"] or MAX_BET), MAX_BET)
     bet = _round_down_to_cap(int(cfg["current_bet"]), cap)
@@ -934,43 +620,76 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
 async def _play_round(runtime, client, user_id: int, chat_id: int,
                       bet: int, st: CasinoState) -> Optional[dict]:
     try:
+        # 1) Send "Casino" and record its id
         log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
         sent_msg = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
-        base_id = int(getattr(sent_msg, "id", 0) or 0)
+        casino_msg_id = int(getattr(sent_msg, "id", 0) or 0)
+        if not casino_msg_id:
+            raise TimeoutError("could not send Casino trigger")
         await asyncio.sleep(3.0)
 
+        # 2) Find the bot's panel — must be from bot, reply_to casino
         panel_msg = None
+        meowie_bot_id = None
+
         for attempt in range(1, 11):
             msgs = await client.get_messages(chat_id, limit=30)
             for m in msgs:
-                if m.id > base_id and not m.out:
-                    if _is_casino_panel(m):
-                        panel_msg = m
-                        break
+                if m.id <= casino_msg_id:
+                    continue
+                if getattr(m, "out", False):
+                    continue
+                sender_id = getattr(m, "sender_id", None)
+                if sender_id is None:
+                    continue
+                if meowie_bot_id is None:
+                    meowie_bot_id = sender_id
+                    log_bot.info(
+                        f"casino: [2] detected bot id={meowie_bot_id}"
+                    )
+
+                if _is_casino_panel(m, meowie_bot_id, (casino_msg_id,)):
+                    panel_msg = m
+                    break
+
             if panel_msg is not None:
                 break
             await asyncio.sleep(2.0)
 
         if panel_msg is None:
-            if st.last_panel_id:
-                cached = await _get_message(client, chat_id, st.last_panel_id)
-                if _is_casino_panel(cached):
-                    log_bot.warning("casino: [2] using cached casino panel")
-                    panel_msg = cached
-
-        if panel_msg is None:
+            try:
+                msgs = await client.get_messages(chat_id, limit=20)
+                dump = []
+                for m in msgs:
+                    if m.id <= casino_msg_id:
+                        continue
+                    dump.append({
+                        "id": m.id,
+                        "out": m.out,
+                        "sender": getattr(m, "sender_id", None),
+                        "reply_to": _get_reply_to(m),
+                        "buttons": _collect_button_texts(m)[:3],
+                        "text": (m.message or "")[:60],
+                    })
+                log_bot.error(f"casino: [2] no casino panel. dump: {dump}")
+            except Exception:
+                pass
             raise TimeoutError("casino panel not found")
 
         st.panel_msg_id = panel_msg.id
         st.last_panel_id = panel_msg.id
         save_config(user_id, panel_msg_id=panel_msg.id)
-        log_bot.info(f"casino: [2] panel id={panel_msg.id}")
+        log_bot.info(
+            f"casino: [2] panel id={panel_msg.id} from bot={meowie_bot_id}"
+        )
         _log_all_buttons(panel_msg, "init")
 
+        # 3) Click WHEEL (index=1)
         log_bot.info(f"casino: [3] clicking WHEEL index={WHEEL_INDEX}")
         await _click_button(client, chat_id, panel_msg.id, index=WHEEL_INDEX)
         await asyncio.sleep(3.0)
 
+        # 4) SET ENTRANCE FEE
         log_bot.info("casino: [4] SET ENTRANCE FEE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step4")
@@ -982,11 +701,13 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
+        # 5) Reply bet amount (to the panel)
         log_bot.info(f"casino: [5] reply bet {_format_amount(bet)}")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         await _send_reply(client, chat_id, _format_amount(bet), panel_msg.id)
         await asyncio.sleep(3.0)
 
+        # 6) SET NUMBER OF PLAYERS = 1
         log_bot.info("casino: [6] SET NUMBER OF PLAYERS")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6")
@@ -1007,6 +728,7 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn1, index=idx1)
         await asyncio.sleep(2.0)
 
+        # 7) CREATE GAMBLING TABLE
         log_bot.info("casino: [7] CREATE GAMBLING TABLE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step7")
@@ -1018,7 +740,8 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.5)
 
-        log_bot.info("casino: [8] sending 🎰 dice")
+        # 8) Send dice as reply to the panel
+        log_bot.info("casino: [8] sending dice")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
 
         dice_value = await _send_dice(client, chat_id, panel_msg.id)
@@ -1027,12 +750,18 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
             dice_value = await _send_dice(client, chat_id, panel_msg.id)
         if dice_value is None:
             log_bot.warning(
-                "casino: [8] dice failed twice, falling back to plain 🎰"
+                "casino: [8] dice failed twice, falling back to plain emoji"
             )
             await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
+        # 9) Poll for result — STRICT: only from bot, reply to our panel/casino
         log_bot.info("casino: [9] polling for result")
-        return await _poll_result(client, chat_id, panel_msg.id, base_id)
+        return await _poll_result(
+            client, chat_id,
+            panel_id=panel_msg.id,
+            casino_id=casino_msg_id,
+            bot_id=meowie_bot_id,
+        )
 
     except Exception as e:
         log_bot.error(
@@ -1050,19 +779,22 @@ async def _get_message(client, chat_id: int, msg_id: int):
 
 
 async def _poll_result(client, chat_id: int, panel_id: int,
-                       after_id: int) -> Optional[dict]:
+                       casino_id: int, bot_id: Optional[int]) -> Optional[dict]:
+    """Poll for the result message.
+
+    STRICT RULES:
+      - Accept ONLY from bot (sender_id == bot_id)
+      - Accept only if reply_to is casino_id, panel_id, or None
+      - Ignore all other messages
+    """
     seen = set()
     pre = await _get_message(client, chat_id, panel_id)
     if pre is not None:
         seen.add((pre.id, pre.message or ""))
 
-    meowie_bot_id = None
-    if pre is not None:
-        meowie_bot_id = getattr(pre, "sender_id", None)
-
     log_bot.info(
         f"casino: [poll] start chat={chat_id} panel={panel_id} "
-        f"base_id={after_id} meowie_bot_id={meowie_bot_id}"
+        f"casino={casino_id} bot_id={bot_id}"
     )
 
     last_seen_texts = []
@@ -1078,7 +810,7 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             candidates.append(msg)
         try:
             recent = await client.get_messages(chat_id, limit=20,
-                                               min_id=after_id)
+                                               min_id=casino_id)
             candidates.extend(recent or [])
         except Exception:
             pass
@@ -1089,33 +821,28 @@ async def _poll_result(client, chat_id: int, panel_id: int,
                 continue
 
             sender_id = getattr(m, "sender_id", None)
-            is_bot = bool(getattr(m, "via_bot_id", None))
-            reply_to = None
-            try:
-                reply_to = getattr(m, "reply_to_msg_id", None)
-                if reply_to is None and getattr(m, "reply_to", None):
-                    reply_to = getattr(m.reply_to, "reply_to_msg_id", None)
-            except Exception:
-                pass
-
-            from_meowie = (
-                meowie_bot_id is not None
-                and sender_id == meowie_bot_id
-            ) or is_bot
-
-            is_reply_to_us = reply_to in (after_id, panel_id)
+            reply_to = _get_reply_to(m)
             is_out = bool(getattr(m, "out", False))
 
             if is_out:
                 continue
 
-            if not (from_meowie or is_reply_to_us):
-                if parse_attempts < 30:
-                    log_bot.info(
-                        f"casino: [poll] SKIP msg={m.id} "
-                        f"sender={sender_id} (not meowie, not reply-to-us) "
-                        f"text={text[:80]!r}"
-                    )
+            # STRICT: must come from the bot
+            if bot_id is not None and sender_id != bot_id:
+                log_bot.info(
+                    f"casino: [poll] SKIP msg={m.id} "
+                    f"sender={sender_id} (not the bot {bot_id}) "
+                    f"text={text[:80]!r}"
+                )
+                continue
+
+            # STRICT: reply_to must be one of ours
+            if reply_to is not None and reply_to not in (casino_id, panel_id):
+                log_bot.info(
+                    f"casino: [poll] SKIP msg={m.id} "
+                    f"reply_to={reply_to} (not our casino/panel) "
+                    f"text={text[:80]!r}"
+                )
                 continue
 
             key = (m.id, text)
@@ -1130,8 +857,8 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             parse_attempts += 1
             if parse_attempts <= 30:
                 log_bot.info(
-                    f"casino: [poll] msg={m.id} out={is_out} "
-                    f"sender={sender_id} reply_to={reply_to} "
+                    f"casino: [poll] msg={m.id} sender={sender_id} "
+                    f"reply_to={reply_to} "
                     f"parsed={'OK' if parsed else 'None'} "
                     f"text={text[:120]!r}"
                 )
@@ -1167,25 +894,6 @@ def _parse_result(text: str) -> Optional[dict]:
         t = t.replace(a, b)
     low = t.lower()
 
-    score = None
-    for pat in (
-        r"score\s*[:：=]\s*(\d+)",
-        r"score\s+(\d+)",
-        r"🎰[^\d]{0,20}(\d+)",
-        r"\|\s*(\d+)\s*\|",
-        r"(\d+)\s*\|",
-        r"(\d+)\s*/\s*64",
-    ):
-        m = re.search(pat, low)
-        if m:
-            try:
-                score = int(m.group(1))
-                break
-            except ValueError:
-                continue
-    if score is None:
-        return None
-
     mult = None
     for pat in (
         r"multiplier\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*x?",
@@ -1202,6 +910,33 @@ def _parse_result(text: str) -> Optional[dict]:
                     break
             except ValueError:
                 continue
+
+    score = None
+    for pat in (
+        r"score\s*[:：=]\s*(\d+)",
+        r"score\s+(\d+)",
+        r"🎰[^\d]{0,20}(\d+)",
+        r"\|\s*(\d+)\s*\|",
+        r"(\d+)\s*\|",
+        r"(\d+)\s*/\s*64",
+    ):
+        m = re.search(pat, low)
+        if m:
+            try:
+                score = int(m.group(1))
+                break
+            except ValueError:
+                continue
+
+    if score is None and mult is None:
+        return None
+    if score is None:
+        if mult is not None and mult <= 0.5:
+            score = 0
+        elif mult is not None and mult >= 1.0:
+            score = 1
+        else:
+            score = 1
 
     if score == 0:
         result = "lose"
