@@ -7,7 +7,8 @@ Strategy (Martingale v2 — فقط روی 0x و 0.5x):
   - نتیجه برد (>=1.5) → bet = initial_bet
   - سقف سخت: 5,000,000 — هر عدد بالاتر به 5M گرد می‌شود (round DOWN)
   - هر شرط باید REPLY به پیام پنل Meowie باشد
-  - هر MEOW_INTERVAL ثانیه یک بار «میوهام» به چت ارسال می‌شود
+  - اگر زمان «میوهام» رسیده باشد، اول آن ارسال می‌شود،
+    10 ثانیه صبر، سپس «Casino» ارسال می‌شود (تضمین ترتیب).
 
 Profile (از پاسخ پنل Meowie پارس می‌شود):
   - Meow Points  → meow_points
@@ -46,7 +47,8 @@ EMOJI_TRIGGER = "🎰"
 MEOW_CALL_TEXT = "میوهام"
 
 DEFAULT_INTERVAL = 301
-MEOW_INTERVAL = 600
+MEOW_INTERVAL = 600                 # هر 10 دقیقه یک بار «میوهام»
+MEOW_TO_CASINO_DELAY = 10.0         # بعد از «میوهام»، این تعداد ثانیه صبر قبل از «Casino»
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 1.5
 
@@ -601,8 +603,6 @@ async def casino_loop(runtime, user_id: int) -> None:
                 await asyncio.sleep(15)
                 continue
 
-            _maybe_send_meow(runtime, user_id, cfg)
-
             next_run_iso = cfg.get("next_run") or ""
             if next_run_iso:
                 try:
@@ -636,33 +636,39 @@ def _schedule_next(user_id: int) -> None:
     save_config(user_id, last_run=_now_iso(), next_run=next_dt.isoformat())
 
 
-def _maybe_send_meow(runtime, user_id: int, cfg: dict) -> None:
+async def _maybe_send_meow(runtime, user_id: int, cfg: dict) -> bool:
+    """اگر زمان «میوهام» رسیده باشد، آن را await کن و True برگردان.
+
+    True یعنی همین الان «میوهام» ارسال شد و caller باید
+    MEOW_TO_CASINO_DELAY ثانیه صبر کند قبل از «Casino».
+    False یعنی ارسال نشد (زمانش نرسیده، client نیست، یا خطا داشت).
+    """
     chat_id = cfg.get("chat_id")
     if not chat_id:
-        return
+        return False
+
     last = cfg.get("last_meow") or ""
     now = datetime.now(dt_timezone.utc)
     if last:
         try:
             last_dt = datetime.fromisoformat(last)
             if (now - last_dt).total_seconds() < MEOW_INTERVAL:
-                return
+                return False
         except ValueError:
             pass
 
     client = runtime.user_clients.get(int(user_id))
     if client is None:
-        return
+        return False
 
-    async def _send():
-        try:
-            await client.send_message(int(chat_id), MEOW_CALL_TEXT)
-            save_config(user_id, last_meow=_now_iso())
-            log_bot.info(f"casino: sent 'میوهام' uid={user_id}")
-        except Exception as e:
-            log_bot.warning(f"casino: meow send failed: {e}")
-
-    asyncio.create_task(_send())
+    try:
+        await client.send_message(int(chat_id), MEOW_CALL_TEXT)
+        save_config(user_id, last_meow=_now_iso())
+        log_bot.info(f"casino: sent 'میوهام' uid={user_id}")
+        return True
+    except Exception as e:
+        log_bot.warning(f"casino: meow send failed: {e}")
+        return False
 
 
 # ===========================================================================
@@ -680,11 +686,6 @@ async def _run_cycle(runtime, user_id: int) -> None:
 async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     cfg = get_config(user_id)
     chat_id = cfg["chat_id"]
-    cap = min(int(cfg["max_allowed_bet"] or MAX_BET), MAX_BET)
-
-    bet = _round_down_to_cap(int(cfg["current_bet"]), cap)
-    if bet != int(cfg["current_bet"]):
-        save_config(user_id, current_bet=bet)
 
     client = runtime.user_clients.get(int(user_id))
     if client is None:
@@ -695,6 +696,40 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         install_casino_listener(runtime, user_id, client)
     except Exception:
         pass
+
+    # -------------------------------------------------------------------
+    # ۱) اگر زمان «میوهام» رسیده، اول آن را بزن، ۱۰ ثانیه صبر کن
+    # -------------------------------------------------------------------
+    meow_sent = False
+    try:
+        meow_sent = await _maybe_send_meow(runtime, user_id, cfg)
+    except Exception as e:
+        log_bot.warning(f"casino: meow before cycle failed: {e}")
+
+    if meow_sent:
+        log_bot.info(
+            f"casino: 'میوهام' sent, waiting {MEOW_TO_CASINO_DELAY:.0f}s "
+            f"before 'Casino' uid={user_id}"
+        )
+        try:
+            await asyncio.wait_for(
+                runtime.stop_event.wait(),
+                timeout=MEOW_TO_CASINO_DELAY,
+            )
+        except asyncio.TimeoutError:
+            pass
+        # cfg ممکن است در این ۱۰ ثانیه عوض شده باشد
+        cfg = get_config(user_id)
+        chat_id = cfg["chat_id"]
+
+    # -------------------------------------------------------------------
+    # ۲) حالا کازینو
+    # -------------------------------------------------------------------
+    cap = min(int(cfg["max_allowed_bet"] or MAX_BET), MAX_BET)
+
+    bet = _round_down_to_cap(int(cfg["current_bet"]), cap)
+    if bet != int(cfg["current_bet"]):
+        save_config(user_id, current_bet=bet)
 
     async with st.lock:
         st.chat_id = chat_id
