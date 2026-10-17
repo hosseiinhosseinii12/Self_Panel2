@@ -1,4 +1,4 @@
-"""HTML templates for the Casino automator panel (admin + user)."""
+﻿"""HTML templates for the Casino automator panel (admin + user)."""
 
 
 # ===========================================================================
@@ -108,7 +108,7 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Initial bet (1000 – 5,000,000)</label>
+          <label>Initial bet (1000 â€“ 5,000,000)</label>
           <input type="number" name="initial_bet"
                  value="{{ cfg.initial_bet }}" min="1000" max="5000000">
         </div>
@@ -121,14 +121,14 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Bet interval (seconds, ≥ 60)</label>
+          <label>Bet interval (seconds, â‰¥ 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60">
         </div>
         <div>
-          <label>Meow interval (seconds, ≥ 60)</label>
+          <label>Meow interval (seconds, â‰¥ 60)</label>
           <input type="number" name="meow_interval"
-                 value="{{ cfg.meow_interval }}" min="60">
+                 value="{{ cfg.meow_interval | default(600) }}" min="60">
         </div>
       </div>
 
@@ -141,7 +141,7 @@ CASINO_ADMIN_TEMPLATE = r"""
       <select name="strategy_mode">
         <option value="martingale"
                 {% if cfg.strategy_mode == 'martingale' %}selected{% endif %}>
-          Martingale v2 (×3 on 0x / 0.5x, repeat on 1x, reset on win)
+          Martingale v2 (Ã—3 on 0x / 0.5x, repeat on 1x, reset on win)
         </option>
         <option value="flat"
                 {% if cfg.strategy_mode == 'flat' %}selected{% endif %}>
@@ -151,9 +151,9 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
-        0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
+        0x / 0.5x â†’ Ã—3 Â· 1x â†’ repeat Â· win (â‰¥1.5x) â†’ reset to initial.<br>
         Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
-        <strong>میوهام</strong> is sent every <code>meow_interval</code> seconds,
+        <strong>Ù…ÛŒÙˆÙ‡Ø§Ù…</strong> is sent every <code>meow_interval</code> seconds,
         15s before <strong>Casino</strong>.
       </div>
 
@@ -222,11 +222,11 @@ CASINO_ADMIN_TEMPLATE = r"""
                   {{ '{:+,}'.format(cfg.total_lost) }}
                 </td></tr>
             <tr><td class="muted">Last run</td>
-                <td class="mono text-right">{{ cfg.last_run[:19] or '—' }}</td></tr>
+                <td class="mono text-right">{{ cfg.last_run[:19] or 'â€”' }}</td></tr>
             <tr><td class="muted">Next run</td>
-                <td class="mono text-right">{{ cfg.next_run[:19] or '—' }}</td></tr>
-            <tr><td class="muted">Last "میوهام"</td>
-                <td class="mono text-right">{{ cfg.last_meow[:19] or '—' }}</td></tr>
+                <td class="mono text-right">{{ cfg.next_run[:19] or 'â€”' }}</td></tr>
+            <tr><td class="muted">Last "Ù…ÛŒÙˆÙ‡Ø§Ù…"</td>
+                <td class="mono text-right">{{ cfg.last_meow[:19] or 'â€”' }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -276,7 +276,7 @@ CASINO_ADMIN_TEMPLATE = r"""
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="empty"><div class="empty-icon">🎰</div>No runs yet</td></tr>
+      <tr><td colspan="6" class="empty"><div class="empty-icon">ðŸŽ°</div>No runs yet</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -419,13 +419,13 @@ CASINO_USER_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Initial bet (1000 – 5,000,000)</label>
+          <label>Initial bet (1000 â€“ 5,000,000)</label>
           <input type="number" name="initial_bet"
                  value="{{ cfg.initial_bet }}" min="1000" max="5000000"
                  {% if not can_edit_bet %}disabled{% endif %}>
         </div>
         <div>
-          <label>Bet interval (seconds, ≥ 60)</label>
+          <label>Bet interval (seconds, â‰¥ 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60"
                  {% if not can_edit_interval %}disabled{% endif %}>
@@ -434,9 +434,9 @@ CASINO_USER_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Meow interval (seconds, ≥ 60)</label>
+          <label>Meow interval (seconds, â‰¥ 60)</label>
           <input type="number" name="meow_interval"
-                 value="{{ cfg.meow_interval }}" min="60">
+                 value="{{ cfg.meow_interval | default(600) }}" min="60">
         </div>
         <div>
           <label>Winning multipliers (comma-separated)</label>
@@ -448,9 +448,9 @@ CASINO_USER_TEMPLATE = r"""
 
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
-        0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
+        0x / 0.5x â†’ Ã—3 Â· 1x â†’ repeat Â· win (â‰¥1.5x) â†’ reset to initial.<br>
         Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
-        <strong>میوهام</strong> is sent every <code>meow_interval</code> seconds,
+        <strong>Ù…ÛŒÙˆÙ‡Ø§Ù…</strong> is sent every <code>meow_interval</code> seconds,
         15s before <strong>Casino</strong>.
       </div>
 
@@ -493,7 +493,7 @@ CASINO_USER_TEMPLATE = r"""
                   {{ cfg.current_streak }} ({{ cfg.best_streak }})
                 </td></tr>
             <tr><td class="muted">Next run</td>
-                <td class="mono text-right">{{ cfg.next_run[:19] or '—' }}</td></tr>
+                <td class="mono text-right">{{ cfg.next_run[:19] or 'â€”' }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -542,7 +542,7 @@ CASINO_USER_TEMPLATE = r"""
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="5" class="empty"><div class="empty-icon">🎰</div>No runs yet</td></tr>
+      <tr><td colspan="5" class="empty"><div class="empty-icon">ðŸŽ°</div>No runs yet</td></tr>
       {% endfor %}
       </tbody>
     </table>

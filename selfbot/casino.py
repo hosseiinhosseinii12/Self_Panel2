@@ -50,7 +50,7 @@ EMOJI_TRIGGER = "🎰"
 MEOW_CALL_TEXT = "میوهام"
 
 DEFAULT_INTERVAL = 301
-MEOW_INTERVAL = 600              # هر 10 دقیقه یک بار «میوهام»
+MEOW_INTERVAL = 600              # default; override per-user via cfg["meow_interval"]
 MEOW_TO_CASINO_DELAY = 15.0      # صبر بعد از «میوهام» قبل از «Casino»
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 1.5
@@ -124,6 +124,22 @@ def _parse_human_number(s: str) -> Optional[float]:
         return float(s.replace(",", "").strip()) * mult
     except ValueError:
         return None
+
+
+def _parse_profile_value(num_str: str, suffix: str) -> Optional[float]:
+    """Parse '24.34' + 'ᴍ' -> 24_340_000; '2.77' + 'ᴋ' -> 2_770."""
+    try:
+        v = float((num_str or "").replace(",", ".").strip())
+    except ValueError:
+        return None
+    s = (suffix or "").strip().lower()
+    if s in ("ᴍ", "m"):
+        return v * 1_000_000
+    if s in ("ᴋ", "k"):
+        return v * 1_000
+    if s in ("ɢ", "g", "ʙ", "b"):
+        return v * 1_000_000_000
+    return v
 
 
 def _button_text(btn) -> str:
@@ -320,6 +336,7 @@ def get_config(user_id: int) -> dict:
         "max_allowed_bet": int(c.get("max_allowed_bet", MAX_BET)),
         "min_bet": int(c.get("min_bet", MIN_BET)),
         "bet_interval": int(c.get("bet_interval", DEFAULT_INTERVAL)),
+        "meow_interval": int(c.get("meow_interval", MEOW_INTERVAL)),
         "multipliers": c.get("multipliers", "1.5,2,2.5,3"),
         "strategy_mode": c.get("strategy_mode", "martingale"),
         "last_run": c.get("last_run", ""),
@@ -374,6 +391,10 @@ def set_initial_bet(user_id: int, amount: int) -> None:
 
 def set_interval(user_id: int, seconds: int) -> None:
     save_config(user_id, bet_interval=max(60, int(seconds)))
+
+
+def set_meow_interval(user_id: int, seconds: int) -> None:
+    save_config(user_id, meow_interval=max(60, int(seconds)))
 
 
 def set_multipliers(user_id: int, mults: str) -> None:
@@ -444,12 +465,12 @@ def _parse_multipliers(cfg: dict) -> list:
 # Profile parser
 # ===========================================================================
 _PROFILE_RE = re.compile(
-    r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*([0-9.,]+\s*[ᴍᴋɢʙmkbg]?)",
+    r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*([ᴍᴋɢʙmkbg])",
     re.IGNORECASE,
 )
 _LEVEL_RE = re.compile(r"ʟᴇᴠᴇʟ\s*[:：]\s*(\d+)", re.IGNORECASE)
 _EXP_RE = re.compile(
-    r"(\d+(?:\.\d+)?\s*[ᴋᴍkm]?)\s*/\s*(\d+(?:\.\d+)?\s*[ᴋᴍkm]?)",
+    r"(\d+(?:[.,]\d+)?\s*[ᴋᴍkm]?)\s*/\s*(\d+(?:[.,]\d+)?\s*[ᴋᴍkm]?)",
     re.IGNORECASE,
 )
 _CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.IGNORECASE)
@@ -463,7 +484,7 @@ def parse_profile(text: str) -> Optional[dict]:
 
     m = _PROFILE_RE.search(text)
     if m:
-        pts = _parse_human_number(m.group(1))
+        pts = _parse_profile_value(m.group(1), m.group(2))
         if pts is not None:
             out["meow_points"] = int(pts)
 
@@ -641,12 +662,7 @@ def _schedule_next(user_id: int) -> None:
 
 async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
                             force: bool = False) -> bool:
-    """اگر زمان «میوهام» رسیده باشد (یا force=True)، آن را await کن.
-
-    True یعنی «میوهام» همین الان ارسال شد و caller باید
-    MEOW_TO_CASINO_DELAY ثانیه صبر کند قبل از «Casino».
-    False یعنی ارسال نشد (زمانش نرسیده، client نیست، یا خطا داشت).
-    """
+    """اگر زمان «میوهام» رسیده باشد (یا force=True)، آن را await کن."""
     chat_id = cfg.get("chat_id")
     log_bot.info(
         f"casino: [meow] check uid={user_id} force={force} "
@@ -659,15 +675,16 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
 
     if not force:
         last = cfg.get("last_meow") or ""
+        meow_interval = int(cfg.get("meow_interval", MEOW_INTERVAL))
         now = datetime.now(dt_timezone.utc)
         if last:
             try:
                 last_dt = datetime.fromisoformat(last)
                 elapsed = (now - last_dt).total_seconds()
-                if elapsed < MEOW_INTERVAL:
+                if elapsed < meow_interval:
                     log_bot.info(
                         f"casino: [meow] skip — last sent {elapsed:.0f}s ago "
-                        f"(< {MEOW_INTERVAL}s) uid={user_id}"
+                        f"(< {meow_interval}s) uid={user_id}"
                     )
                     return False
             except ValueError:
@@ -682,7 +699,6 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
         log_bot.info(f"casino: [meow] sending '{MEOW_CALL_TEXT}' uid={user_id}")
         await client.send_message(int(chat_id), MEOW_CALL_TEXT)
         save_config(user_id, last_meow=_now_iso())
-        # verify persistence
         try:
             verify = get_config(user_id).get("last_meow", "")
             log_bot.info(f"casino: [meow] verified last_meow={verify}")
@@ -729,10 +745,9 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         pass
 
     # -------------------------------------------------------------------
-    # ۱) منطق force_meow:
-    #    - last_meow خالی → اولین بار → force
-    #    - elapsed >= MEOW_INTERVAL → force (هر ۱۰ دقیقه یک بار)
+    # ۱) منطق force_meow با meow_interval قابل تنظیم
     # -------------------------------------------------------------------
+    meow_interval = int(cfg.get("meow_interval", MEOW_INTERVAL))
     last_meow = cfg.get("last_meow") or ""
     force_meow = False
     if not last_meow:
@@ -742,16 +757,16 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         try:
             last_dt = datetime.fromisoformat(last_meow)
             elapsed = (datetime.now(dt_timezone.utc) - last_dt).total_seconds()
-            if elapsed >= MEOW_INTERVAL:
+            if elapsed >= meow_interval:
                 force_meow = True
                 log_bot.info(
                     f"casino: [meow] interval passed "
-                    f"({elapsed:.0f}s >= {MEOW_INTERVAL}s) — force uid={user_id}"
+                    f"({elapsed:.0f}s >= {meow_interval}s) — force uid={user_id}"
                 )
             else:
                 log_bot.info(
                     f"casino: [meow] skip — only {elapsed:.0f}s since last "
-                    f"(< {MEOW_INTERVAL}s) uid={user_id}"
+                    f"(< {meow_interval}s) uid={user_id}"
                 )
         except ValueError:
             force_meow = True
@@ -776,7 +791,6 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
             )
         except asyncio.TimeoutError:
             pass
-        # cfg ممکن است در این ۱۵ ثانیه عوض شده باشد
         cfg = get_config(user_id)
         chat_id = cfg["chat_id"]
 
@@ -1005,14 +1019,7 @@ async def _poll_result(client, chat_id: int, panel_id: int,
 
 
 def _parse_result(text: str) -> Optional[dict]:
-    """Parse Meowie result. Handles many formats.
-
-    Examples:
-      "Score: 2 | 1.5x"
-      "ꜱᴄᴏʀᴇ: 2 | x1.5"
-      "🎰 Score 2 | Multiplier 1.5x"
-      "Score:0|0x"
-    """
+    """Parse Meowie result. Handles many formats."""
     if not text:
         return None
 
