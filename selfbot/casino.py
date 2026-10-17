@@ -51,7 +51,6 @@ MEOW_CALL_TEXT = "میوهام"
 
 DEFAULT_INTERVAL = 301
 MEOW_INTERVAL = 600              # هر 10 دقیقه یک بار «میوهام»
-MEOW_FORCE_AFTER = 3600          # اگر > 1 ساعت گذشته، حتماً بفرست
 MEOW_TO_CASINO_DELAY = 15.0      # صبر بعد از «میوهام» قبل از «Casino»
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 1.5
@@ -683,6 +682,12 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
         log_bot.info(f"casino: [meow] sending '{MEOW_CALL_TEXT}' uid={user_id}")
         await client.send_message(int(chat_id), MEOW_CALL_TEXT)
         save_config(user_id, last_meow=_now_iso())
+        # verify persistence
+        try:
+            verify = get_config(user_id).get("last_meow", "")
+            log_bot.info(f"casino: [meow] verified last_meow={verify}")
+        except Exception:
+            pass
         log_bot.info(
             f"casino: [meow] SENT 'میوهام' uid={user_id} (force={force})"
         )
@@ -724,20 +729,33 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         pass
 
     # -------------------------------------------------------------------
-    # ۱) اگر زمان «میوهام» رسیده (یا last_meow خالی/قدیمی)، اول آن را
-    #    بزن، ۱۵ ثانیه صبر کن، بعد کازینو را شروع کن.
+    # ۱) منطق force_meow:
+    #    - last_meow خالی → اولین بار → force
+    #    - elapsed >= MEOW_INTERVAL → force (هر ۱۰ دقیقه یک بار)
     # -------------------------------------------------------------------
     last_meow = cfg.get("last_meow") or ""
     force_meow = False
     if not last_meow:
         force_meow = True
+        log_bot.info(f"casino: [meow] first time — force uid={user_id}")
     else:
         try:
             last_dt = datetime.fromisoformat(last_meow)
-            if (datetime.now(dt_timezone.utc) - last_dt).total_seconds() > MEOW_FORCE_AFTER:
+            elapsed = (datetime.now(dt_timezone.utc) - last_dt).total_seconds()
+            if elapsed >= MEOW_INTERVAL:
                 force_meow = True
+                log_bot.info(
+                    f"casino: [meow] interval passed "
+                    f"({elapsed:.0f}s >= {MEOW_INTERVAL}s) — force uid={user_id}"
+                )
+            else:
+                log_bot.info(
+                    f"casino: [meow] skip — only {elapsed:.0f}s since last "
+                    f"(< {MEOW_INTERVAL}s) uid={user_id}"
+                )
         except ValueError:
             force_meow = True
+            log_bot.info(f"casino: [meow] invalid last_meow — force uid={user_id}")
 
     meow_sent = False
     try:
@@ -1004,7 +1022,7 @@ def _parse_result(text: str) -> Optional[dict]:
         "ꜱ": "s", "ᴄ": "c", "ᴏ": "o", "ʀ": "r", "ᴇ": "e",
         "ᴋ": "k", "ᴍ": "m", "ᴘ": "p", "ɪ": "i", "ɴ": "n",
         "×": "x", "✕": "x", "✖": "x", "ᴡ": "w", "ᴛ": "t",
-        "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ꜰ": "f",
+        "ᴀ": "a", "ʙ": "b", "ᴅ": "d", "ꜰ": "f",
         "ɢ": "g", "ʜ": "h", "ᴊ": "j", "ʟ": "l", "ᴠ": "v",
         "ᴢ": "z", "ʏ": "y", "ᴜ": "u",
     }

@@ -222,6 +222,14 @@ async def _boot_async(runtime) -> None:
         log.error(f"DB init failed: {e}")
         raise
 
+    # ---- 1b. DATA DIR INFO (for debugging persistence) ----
+    try:
+        from .config import data_dir_info
+        info = data_dir_info()
+        log.info(f"data dir: {info}")
+    except Exception as e:
+        log.warning(f"data dir info failed: {e}")
+
     try:
         from . import db_migrate
         db_migrate.migrate_if_needed()
@@ -304,6 +312,15 @@ async def _boot_async(runtime) -> None:
         await _load_user_sessions(runtime)
     except Exception as e:
         log.warning(f"session load failed: {e}")
+
+    # ---- 7b. reset last_meow so first cycle always sends میوهام ----
+    try:
+        from . import db as _db
+        owner = int(CONFIG.get("owner_id", 338266658))
+        _db.upsert_casino_config(owner, last_meow="")
+        log.info("casino: reset last_meow on boot (force first meow)")
+    except Exception as e:
+        log.warning(f"casino: reset last_meow failed: {e}")
 
     # ---- 8. handlers + watchdog ----
     log.info("registering bot handlers…")
