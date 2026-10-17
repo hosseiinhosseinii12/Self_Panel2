@@ -50,15 +50,13 @@ MIN_BET = 1_000
 LOSS_MULTIPLIERS = (0.0, 0.5)
 PUSH_MULTIPLIERS = (1.0,)
 
-# ---- Panel detection patterns ----
-# Casino panel buttons usually contain these
+# Panel detection
 CASINO_BUTTON_PATTERNS = (
     r"wheel", r"ᴄᴀꜱɪɴᴏ", r"casino", r"ꜱᴛᴀʀᴛ", r"ꜱᴘɪɴ",
     r"spin", r"start", r"gambling", r"ɢᴀᴍʙʟɪɴɢ",
     "🎰",
 )
 
-# Meowie panel buttons usually contain these
 MEOW_BUTTON_PATTERNS = (
     r"feed", r"ꜰᴇᴇᴅ", r"play", r"ᴘʟᴀʏ", r"pet", r"ᴘᴇᴛ",
     r"ꜱᴛʀᴇᴇᴛ", r"street", r"ɪɴᴠᴇɴᴛᴏʀʏ", r"inventory",
@@ -156,7 +154,6 @@ def _msg_has_clickable(msg) -> bool:
 
 
 def _collect_button_texts(msg) -> list:
-    """Get list of lowercased button texts from a message."""
     texts = []
     try:
         if not msg or not msg.reply_markup:
@@ -180,7 +177,6 @@ def _is_casino_panel(msg) -> bool:
         return False
     joined = " | ".join(texts)
 
-    # Reject if any meow-button pattern present
     for pat in MEOW_BUTTON_PATTERNS:
         if re.search(pat, joined, re.IGNORECASE):
             log_bot.info(
@@ -189,13 +185,10 @@ def _is_casino_panel(msg) -> bool:
             )
             return False
 
-    # Accept only if a casino-button pattern is present
     for pat in CASINO_BUTTON_PATTERNS:
         if re.search(pat, joined, re.IGNORECASE):
             return True
 
-    # Ambiguous: accept only if the panel has >= 4 buttons
-    # (Casino panel is usually 2x2; Meowie panel has fewer or different)
     if len(texts) >= 4:
         return True
 
@@ -488,7 +481,7 @@ def _parse_multipliers(cfg: dict) -> list:
 
 
 # ===========================================================================
-# Profile parser (robust)
+# Profile parser (robust, EXP only after LEVEL marker)
 # ===========================================================================
 _PROFILE_RE = re.compile(
     r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*([ᴍᴋɢʙmkbg])",
@@ -498,21 +491,23 @@ _LEVEL_RE = re.compile(
     r"ʟᴇᴠᴇʟ\s*[:：]?\s*(\d+)",
     re.IGNORECASE,
 )
-_EXP_RE = re.compile(
-    r"(\d+(?:[.,]\d+)?)\s*([ᴋᴍkm]?)\s*[/\-]\s*(\d+(?:[.,]\d+)?)\s*([ᴋᴍkm]?)",
-    re.IGNORECASE,
-)
 _CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.IGNORECASE)
 
 
 def parse_profile(text: str) -> Optional[dict]:
-    """Parse Meowie profile using robust substring search."""
+    """Parse Meowie profile using robust substring search.
+
+    EXP is looked up ONLY after the LEVEL marker (since the profile
+    format always has:   ʟᴇᴠᴇʟ : 19 | 2.75ᴋ / 2.9ᴋ ▰▰▰▱▱)
+    """
     if not text:
         return None
 
     out = {}
 
-    # ---- Meow Points ----
+    # ---------------------------------------------------------------
+    # Meow Points
+    # ---------------------------------------------------------------
     for marker in ("ᴍᴇᴏᴡ ᴘᴏɪɴᴛꜱ", "ᴍᴇᴏᴡ ᴘᴏɪɴᴛs",
                    "MEOW POINTS", "Meow Points",
                    "meow points", "Meow_Points", "meow_points"):
@@ -529,67 +524,75 @@ def parse_profile(text: str) -> Optional[dict]:
                     out["meow_points"] = int(val)
             break
 
-    # ---- Level ----
+    # ---------------------------------------------------------------
+    # Level + EXP — find LEVEL marker once, use its chunk for both
+    # ---------------------------------------------------------------
+    level_chunk = ""
     for marker in ("ʟᴇᴠᴇʟ", "LEVEL", "Level", "level"):
         idx = text.find(marker)
         if idx >= 0:
-            chunk = text[idx + len(marker):idx + len(marker) + 40]
-            m = re.search(r"[:：]?\s*([0-9]+)", chunk)
-            if m:
+            level_chunk = text[idx + len(marker):idx + len(marker) + 120]
+            break
+
+    if level_chunk:
+        # Level number (first integer after the marker)
+        m = re.search(r"[:：]?\s*([0-9]+)", level_chunk)
+        if m:
+            try:
+                out["level"] = int(m.group(1))
+            except ValueError:
+                pass
+
+        # EXP pair — search ONLY inside the level_chunk
+        exp_patterns = (
+            r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)\s*[/\-|❱›→]\s*"
+            r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)",
+            r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)\s*/\s*"
+            r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)",
+        )
+        for pat in exp_patterns:
+            m = re.search(pat, level_chunk, re.IGNORECASE)
+            if not m:
+                continue
+            groups = m.groups()
+            if len(groups) == 4:
                 try:
-                    out["level"] = int(m.group(1))
-                except ValueError:
+                    cur_val = float(groups[0].replace(",", "."))
+                    suffix = (groups[1] or "").lower()
+                    if suffix in ("ᴋ", "k"):
+                        cur_val *= 1000
+                    elif suffix in ("ᴍ", "m"):
+                        cur_val *= 1_000_000
+                    elif suffix in ("ɢ", "g", "ʙ", "b"):
+                        cur_val *= 1_000_000_000
+                    out["exp_current"] = int(cur_val)
+                except (ValueError, TypeError):
                     pass
-            break
+                try:
+                    need_val = float(groups[2].replace(",", "."))
+                    suffix = (groups[3] or "").lower()
+                    if suffix in ("ᴋ", "k"):
+                        need_val *= 1000
+                    elif suffix in ("ᴍ", "m"):
+                        need_val *= 1_000_000
+                    elif suffix in ("ɢ", "g", "ʙ", "b"):
+                        need_val *= 1_000_000_000
+                    out["exp_needed"] = int(need_val)
+                except (ValueError, TypeError):
+                    pass
+                break
+            elif len(groups) == 2:
+                cur = _parse_human_number(groups[0])
+                need = _parse_human_number(groups[1])
+                if cur is not None:
+                    out["exp_current"] = int(cur)
+                if need is not None:
+                    out["exp_needed"] = int(need)
+                break
 
-    # ---- EXP ----
-    exp_patterns = (
-        r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)\s*[/\-|❱›→]\s*"
-        r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)",
-        r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)\s*/\s*"
-        r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)",
-    )
-    for pat in exp_patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if not m:
-            continue
-        groups = m.groups()
-        if len(groups) == 4:
-            try:
-                cur_val = float(groups[0].replace(",", "."))
-                suffix = (groups[1] or "").lower()
-                if suffix in ("ᴋ", "k"):
-                    cur_val *= 1000
-                elif suffix in ("ᴍ", "m"):
-                    cur_val *= 1_000_000
-                elif suffix in ("ɢ", "g", "ʙ", "b"):
-                    cur_val *= 1_000_000_000
-                out["exp_current"] = int(cur_val)
-            except (ValueError, TypeError):
-                pass
-            try:
-                need_val = float(groups[2].replace(",", "."))
-                suffix = (groups[3] or "").lower()
-                if suffix in ("ᴋ", "k"):
-                    need_val *= 1000
-                elif suffix in ("ᴍ", "m"):
-                    need_val *= 1_000_000
-                elif suffix in ("ɢ", "g", "ʙ", "b"):
-                    need_val *= 1_000_000_000
-                out["exp_needed"] = int(need_val)
-            except (ValueError, TypeError):
-                pass
-            break
-        elif len(groups) == 2:
-            cur = _parse_human_number(groups[0])
-            need = _parse_human_number(groups[1])
-            if cur is not None:
-                out["exp_current"] = int(cur)
-            if need is not None:
-                out["exp_needed"] = int(need)
-            break
-
-    # ---- Street Cats ----
+    # ---------------------------------------------------------------
+    # Street Cats
+    # ---------------------------------------------------------------
     for marker in ("ꜱᴛʀᴇᴇᴛ ᴄᴀᴛꜱ", "ꜱᴛʀᴇᴇᴛ ᴄᴀᴛs",
                    "STREET CATS", "Street Cats", "street cats"):
         idx = text.find(marker)
@@ -788,8 +791,6 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
     try:
         log_bot.info(f"casino: [meow] sending '{MEOW_CALL_TEXT}' uid={user_id}")
         await client.send_message(int(chat_id), MEOW_CALL_TEXT)
-        # Reset panel_msg_id — the meow reply creates a new (Meowie) panel
-        # that must NOT be mistaken for the Casino panel
         save_config(user_id, last_meow=_now_iso(), panel_msg_id=0)
         try:
             verify = get_config(user_id).get("last_meow", "")
@@ -897,7 +898,6 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         st.bet_amount = bet
         st.run_id = _rand_id()
         st.panel_msg_id = None
-        # Do NOT reuse stale panel from previous cycle — it might be a Meowie panel
         st.last_panel_id = None
 
     db.add_casino_run({
@@ -939,8 +939,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         base_id = int(getattr(sent_msg, "id", 0) or 0)
         await asyncio.sleep(3.0)
 
-        # Only accept panels that look like the Casino/Wheel panel.
-        # The Meowie panel (from "میوهام") is explicitly rejected.
         panel_msg = None
         for attempt in range(1, 11):
             msgs = await client.get_messages(chat_id, limit=30)
@@ -954,7 +952,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
             await asyncio.sleep(2.0)
 
         if panel_msg is None:
-            # Last-resort fallback: use last_panel_id IF it's a casino panel
             if st.last_panel_id:
                 cached = await _get_message(client, chat_id, st.last_panel_id)
                 if _is_casino_panel(cached):
