@@ -90,18 +90,15 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             strategy_mode=strategy,
         )
 
-        # only restart the martingale when the base bet actually changed
         if initial != old_cfg["initial_bet"]:
             fields["current_bet"] = initial
             fields["peak_bet"] = initial
 
-        # clamp current bet if it exceeds the new cap
         cur = int(fields.get("current_bet", old_cfg["current_bet"]))
         clamped = CAS._round_down_to_cap(cur, max_bet)
         if clamped != cur:
             fields["current_bet"] = clamped
 
-        # a different chat means the cached panel message is invalid
         if chat_id != old_cfg["chat_id"]:
             fields["panel_msg_id"] = 0
 
@@ -190,6 +187,19 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         uid = _owner_id()
         db.clear_casino_logs(uid)
         flash("Logs cleared.")
+        return redirect(url_for("casino_page"))
+
+    @app.route("/admin/casino/clear_runs", methods=["POST"])
+    @login_required
+    def casino_clear_runs():
+        csrf_check()
+        uid = _owner_id()
+        n = db.clear_casino_runs(uid)
+        audit_record(current_admin_id(), "casino_clear_runs",
+                     target=str(uid), ip=request.remote_addr,
+                     admin_name=current_admin_name(),
+                     meta={"deleted": n})
+        flash(f"Deleted {n} runs.")
         return redirect(url_for("casino_page"))
 
 
@@ -330,4 +340,13 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
                 flash(f"Run failed: {result.get('error')}", "error")
         except Exception as e:
             flash(f"Trigger failed: {e}", "error")
+        return redirect(url_for("user.casino_page"))
+
+    @bp.route("/casino/clear_runs", methods=["POST"])
+    @login_required
+    def casino_clear_runs():
+        csrf_check()
+        uid = get_uid()
+        n = db.clear_casino_runs(uid)
+        flash(f"Deleted {n} runs.")
         return redirect(url_for("user.casino_page"))
