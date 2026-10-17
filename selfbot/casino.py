@@ -778,6 +778,11 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     if bet != int(cfg["current_bet"]):
         save_config(user_id, current_bet=bet)
 
+    # peak_bet فوراً آپدیت شود (حتی قبل از بازی)
+    if bet > int(cfg.get("peak_bet", 0) or 0):
+        save_config(user_id, peak_bet=bet)
+        log_bot.info(f"casino: [peak] updated peak_bet={bet} (before play)")
+
     async with st.lock:
         st.chat_id = chat_id
         st.bet_amount = bet
@@ -940,6 +945,15 @@ async def _poll_result(client, chat_id: int, panel_id: int,
     if pre is not None:
         seen.add((pre.id, pre.message or ""))
 
+    meowie_bot_id = None
+    if pre is not None:
+        meowie_bot_id = getattr(pre, "sender_id", None)
+
+    log_bot.info(
+        f"casino: [poll] start chat={chat_id} panel={panel_id} "
+        f"base_id={after_id} meowie_bot_id={meowie_bot_id}"
+    )
+
     last_seen_texts = []
     parse_attempts = 0
 
@@ -962,6 +976,37 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             text = m.message or ""
             if not text:
                 continue
+
+            sender_id = getattr(m, "sender_id", None)
+            is_bot = bool(getattr(m, "via_bot_id", None))
+            reply_to = None
+            try:
+                reply_to = getattr(m, "reply_to_msg_id", None)
+                if reply_to is None and getattr(m, "reply_to", None):
+                    reply_to = getattr(m.reply_to, "reply_to_msg_id", None)
+            except Exception:
+                pass
+
+            from_meowie = (
+                meowie_bot_id is not None
+                and sender_id == meowie_bot_id
+            ) or is_bot
+
+            is_reply_to_us = reply_to in (after_id, panel_id)
+            is_out = bool(getattr(m, "out", False))
+
+            if is_out:
+                continue
+
+            if not (from_meowie or is_reply_to_us):
+                if parse_attempts < 30:
+                    log_bot.info(
+                        f"casino: [poll] SKIP msg={m.id} "
+                        f"sender={sender_id} (not meowie, not reply-to-us) "
+                        f"text={text[:80]!r}"
+                    )
+                continue
+
             key = (m.id, text)
             if key in seen:
                 continue
@@ -974,7 +1019,8 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             parse_attempts += 1
             if parse_attempts <= 30:
                 log_bot.info(
-                    f"casino: [poll] msg={m.id} out={m.out} "
+                    f"casino: [poll] msg={m.id} out={is_out} "
+                    f"sender={sender_id} reply_to={reply_to} "
                     f"parsed={'OK' if parsed else 'None'} "
                     f"text={text[:120]!r}"
                 )
@@ -1106,7 +1152,7 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
     total_won = int(cfg["total_won"]) + won_amount
     total_lost = int(cfg["total_lost"]) + lost_amount
     total_profit = int(cfg["total_profit"]) + profit
-    peak_bet = max(int(cfg["peak_bet"]), bet)
+    peak_bet = max(int(cfg["peak_bet"]), bet, int(next_bet))
     peak_balance = max(int(cfg["peak_balance"]), total_profit)
 
     db.update_casino_run(
