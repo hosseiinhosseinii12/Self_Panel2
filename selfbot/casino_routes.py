@@ -15,8 +15,8 @@ from . import db
 # Admin routes
 # ===========================================================================
 def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
-                                  render_page, get_runtime_safe,
-                                  current_admin_id, current_admin_name):
+                                 render_page, get_runtime_safe,
+                                 current_admin_id, current_admin_name):
     """Register casino routes for the admin panel."""
 
     def _owner_id() -> int:
@@ -42,7 +42,7 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         csrf_check()
         uid = _owner_id()
 
-        # chat_id
+        # ---- chat_id ----
         chat_raw = (request.form.get("chat_id") or "").strip()
         chat_id = None
         if chat_raw:
@@ -52,26 +52,27 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
                 flash("Invalid chat ID.", "error")
                 return redirect(url_for("casino_page"))
 
-        # initial bet
+        # ---- initial bet ----
         try:
             initial = int(request.form.get("initial_bet", "100000"))
-            initial = max(1, initial)
+            initial = max(CAS.MIN_BET, min(CAS.MAX_BET, initial))
         except ValueError:
-            initial = 100000
+            initial = CAS.START_BET
 
-        # max bet
+        # ---- max bet (hard-capped) ----
         try:
-            max_bet = int(request.form.get("max_bet", "100000000"))
+            max_bet = int(request.form.get("max_bet", str(CAS.MAX_BET)))
             max_bet = max(initial, max_bet)
         except ValueError:
-            max_bet = 100_000_000
+            max_bet = CAS.MAX_BET
+        max_bet = min(max_bet, CAS.MAX_BET)
 
-        # interval
+        # ---- interval ----
         try:
             interval = int(request.form.get("bet_interval", "301"))
             interval = max(60, interval)
         except ValueError:
-            interval = 301
+            interval = CAS.DEFAULT_INTERVAL
 
         mults = (request.form.get("multipliers") or "1.5,2,2.5,3").strip()
         strategy = request.form.get("strategy_mode", "martingale")
@@ -83,27 +84,33 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             chat_id=chat_id,
             initial_bet=initial,
             max_bet=max_bet,
-            # the strategy engine reads max_allowed_bet; the game itself
-            # rejects anything above CAS.MAX_BET
-            max_allowed_bet=min(max_bet, CAS.MAX_BET),
+            max_allowed_bet=max_bet,
             bet_interval=interval,
             multipliers=mults,
             strategy_mode=strategy,
         )
+
         # only restart the martingale when the base bet actually changed
-        # (saving the form used to reset progress every single time)
         if initial != old_cfg["initial_bet"]:
             fields["current_bet"] = initial
             fields["peak_bet"] = initial
+
+        # clamp current bet if it exceeds the new cap
+        cur = int(fields.get("current_bet", old_cfg["current_bet"]))
+        clamped = CAS._round_down_to_cap(cur, max_bet)
+        if clamped != cur:
+            fields["current_bet"] = clamped
+
         # a different chat means the cached panel message is invalid
         if chat_id != old_cfg["chat_id"]:
             fields["panel_msg_id"] = 0
+
         CAS.save_config(uid, **fields)
         audit_record(current_admin_id(), "casino_save", target=str(uid),
                      ip=request.remote_addr,
                      admin_name=current_admin_name(),
                      meta={"chat_id": chat_id, "initial": initial,
-                            "interval": interval})
+                           "interval": interval, "max_bet": max_bet})
         flash("Casino configuration saved.")
         return redirect(url_for("casino_page"))
 
@@ -119,7 +126,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             return redirect(url_for("casino_page"))
         CAS.set_enabled(uid, new_state)
 
-        # spawn loop if starting
         if new_state:
             rt = get_runtime_safe()
             if rt:
@@ -191,7 +197,7 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
 # User routes (registered on the user blueprint)
 # ===========================================================================
 def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
-                                 render_layout, get_uid):
+                                render_layout, get_uid):
     """Register casino routes on the user blueprint.
 
     `render_layout` is a callable: render_layout(title, body, active) -> HTML
@@ -209,7 +215,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         stats = db.casino_stats(uid)
         runs = db.list_casino_runs(uid, limit=30)
 
-        # Permission rules
         is_admin = (uid == _owner_id())
         can_edit_chat = is_admin
         can_edit_bet = True
@@ -232,34 +237,46 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         cfg = CAS.get_config(uid)
         is_admin = (uid == _owner_id())
 
-        # chat_id (admin only)
+        fields = {}
+
+        # ---- chat_id (admin only) ----
         if is_admin:
             chat_raw = (request.form.get("chat_id") or "").strip()
             if chat_raw:
                 try:
-                    CAS.set_chat(uid, int(chat_raw))
+                    new_chat = int(chat_raw)
+                    if new_chat != cfg["chat_id"]:
+                        fields["chat_id"] = new_chat
+                        fields["panel_msg_id"] = 0
                 except ValueError:
                     flash("Invalid chat ID.", "error")
                     return redirect(url_for("user.casino_page"))
 
-        # initial bet
+        # ---- initial bet ----
         try:
-            initial = int(request.form.get("initial_bet", str(cfg["initial_bet"])))
-            initial = max(1, initial)
+            initial = int(request.form.get(
+                "initial_bet", str(cfg["initial_bet"])))
+            initial = max(CAS.MIN_BET, min(CAS.MAX_BET, initial))
         except ValueError:
             initial = cfg["initial_bet"]
-        if initial != cfg["initial_bet"]:
-            CAS.save_config(uid, initial_bet=initial, current_bet=initial,
-                            peak_bet=initial)
 
-        # interval
+        if initial != cfg["initial_bet"]:
+            fields["initial_bet"] = initial
+            fields["current_bet"] = initial
+            fields["peak_bet"] = initial
+
+        # ---- interval ----
         try:
-            interval = int(request.form.get("bet_interval",
-                                             str(cfg["bet_interval"])))
+            interval = int(request.form.get(
+                "bet_interval", str(cfg["bet_interval"])))
             interval = max(60, interval)
         except ValueError:
             interval = cfg["bet_interval"]
-        CAS.set_interval(uid, interval)
+        if interval != cfg["bet_interval"]:
+            fields["bet_interval"] = interval
+
+        if fields:
+            CAS.save_config(uid, **fields)
 
         flash("Casino settings saved.")
         return redirect(url_for("user.casino_page"))

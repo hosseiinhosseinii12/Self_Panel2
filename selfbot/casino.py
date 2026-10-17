@@ -1,25 +1,21 @@
 """Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
 
-Strategy (Martingale with 5M cap):
-  - Start: 100,000
-  - On loss: bet *= 3
-  - On win: reset to 100,000
-  - Cap: 5,000,000 (bot rejects anything above)
-  - Any computed bet above cap -> rounded down to 5,000,000
+Strategy (Martingale v2 — فقط روی 0x و 0.5x):
+  - Initial bet قابل ویرایش (پیش‌فرض 100,000)
+  - نتیجه 0x یا 0.5x  → bet = bet * 3
+  - نتیجه 1x          → bet = bet (تکرار)
+  - نتیجه برد (>=1.5) → bet = initial_bet
+  - سقف سخت: 5,000,000 — هر عدد بالاتر به 5M گرد می‌شود (round DOWN)
+  - هر شرط باید REPLY به پیام پنل Meowie باشد
+  - هر MEOW_INTERVAL ثانیه یک بار «میوهام» به چت ارسال می‌شود
 
-Ledger (per user):
-  - total_invested: sum of all bets placed
-  - total_won: sum of winning payouts (bet * multiplier)
-  - total_lost: sum of losing bets
-  - total_profit: won - lost
-  - peak_balance: max(total_won - total_lost)
-  - current_streak: consecutive wins
-  - best_streak: longest consecutive wins
-  - last_multiplier, last_score, last_result
+Profile (از پاسخ پنل Meowie پارس می‌شود):
+  - Meow Points  → meow_points
+  - Level        → level
+  - Level EXP    → exp_current / exp_needed
+  - Street Cats  → street_cats
 
-FIX: the animated 🎰 is now sent as a real Telegram Dice
-(InputMediaDice) instead of a custom-emoji text entity, so the game bot
-counts it (message.dice) and it is animated for every account.
+همه در casino_config ذخیره و در پنل وب نمایش داده می‌شود.
 """
 import asyncio
 import random
@@ -47,10 +43,12 @@ except ImportError:
 # ===========================================================================
 CASINO_TRIGGER_TEXT = "Casino"
 EMOJI_TRIGGER = "🎰"
+MEOW_CALL_TEXT = "میوهام"
 
 DEFAULT_INTERVAL = 301
+MEOW_INTERVAL = 600
 GAME_TIMEOUT = 120.0
-POLL_INTERVAL = 1.5   # was 0.4 -> too aggressive, risks FloodWait
+POLL_INTERVAL = 1.5
 
 _INLINE_TYPES = (
     "KeyboardButtonCallback",
@@ -67,6 +65,10 @@ LOSS_MULTIPLIER = 3
 MAX_BET = 5_000_000
 MIN_BET = 1_000
 
+# Classification
+LOSS_MULTIPLIERS = (0.0, 0.5)
+PUSH_MULTIPLIERS = (1.0,)
+
 
 # ===========================================================================
 # Helpers
@@ -80,13 +82,43 @@ def _now_iso() -> str:
 
 
 def _format_amount(n: int) -> str:
-    """Exact amount for the game bot. Never rounds (2,700,000 -> '2700k',
-    NOT '2m' like the old version did)."""
+    """Exact amount for the game bot (2,700,000 -> '2700k', NOT '2.7m')."""
     n = int(n)
     for unit, suffix in ((1_000_000_000, "g"), (1_000_000, "m"), (1_000, "k")):
         if n >= unit and n % unit == 0:
             return f"{n // unit}{suffix}"
     return str(n)
+
+
+def _round_down_to_cap(bet: int, cap: int = MAX_BET) -> int:
+    """Round bet DOWN to a multiple of 1000, never above cap."""
+    bet = int(bet)
+    if bet > cap:
+        bet = cap
+    if bet >= 1000:
+        bet = (bet // 1000) * 1000
+    return max(MIN_BET, bet)
+
+
+def _parse_human_number(s: str) -> Optional[float]:
+    """Parse '23.88ᴍ' -> 23_880_000, '2.75ᴋ' -> 2750, '5.99ᴋ' -> 5990."""
+    if not s:
+        return None
+    s = s.strip().lower()
+    mult = 1.0
+    if s.endswith("ᴍ") or s.endswith("m"):
+        mult = 1_000_000.0
+        s = s[:-1]
+    elif s.endswith("ᴋ") or s.endswith("k"):
+        mult = 1_000.0
+        s = s[:-1]
+    elif s.endswith("ɢ") or s.endswith("g") or s.endswith("ʙ") or s.endswith("b"):
+        mult = 1_000_000_000.0
+        s = s[:-1]
+    try:
+        return float(s.replace(",", "").strip()) * mult
+    except ValueError:
+        return None
 
 
 def _button_text(btn) -> str:
@@ -155,7 +187,7 @@ def _find_button_with_index(msg, patterns: list):
 
 
 async def _click_button(client, chat_id: int, message_id: int,
-                         btn=None, index: Optional[int] = None) -> bool:
+                        btn=None, index: Optional[int] = None) -> bool:
     if btn is None and index is None:
         return False
     try:
@@ -218,20 +250,11 @@ async def _send_reply(client, chat_id: int, text: str, reply_to: int) -> None:
 
 async def _send_dice(client, chat_id: int, reply_to: int,
                      emoticon: str = EMOJI_TRIGGER) -> Optional[int]:
-    """Send a real Telegram dice (animated slot machine) as a reply.
-
-    This is the animated 🎰 that game bots read via `message.dice`.
-    The value (1..64 for 🎰) is decided by Telegram's servers.
-
-    Returns the dice value on success (0 if sent but value unknown),
-    or None on failure.
-    """
+    """Send a real Telegram dice (animated 🎰) as a reply to the panel."""
     if not HAS_TELETHON:
         return None
 
     sent = None
-
-    # Attempt 1: high-level send_file with InputMediaDice
     try:
         sent = await client.send_file(
             chat_id,
@@ -241,7 +264,6 @@ async def _send_dice(client, chat_id: int, reply_to: int,
     except Exception as e:
         log_bot.warning(f"casino: [dice] send_file failed: {e}")
 
-    # Attempt 2: raw SendMediaRequest (old/new Telethon signatures)
     if sent is None:
         try:
             peer = await client.get_input_entity(chat_id)
@@ -265,7 +287,7 @@ async def _send_dice(client, chat_id: int, reply_to: int,
                     reply_to_msg_id=reply_to,
                 ))
             log_bot.info("casino: [dice] OK via raw SendMediaRequest")
-            return 0  # sent, value unknown
+            return 0
         except Exception as e:
             log_bot.warning(f"casino: [dice] raw request failed: {e}")
             return None
@@ -297,6 +319,7 @@ def get_config(user_id: int) -> dict:
         "strategy_mode": c.get("strategy_mode", "martingale"),
         "last_run": c.get("last_run", ""),
         "next_run": c.get("next_run", ""),
+        "last_meow": c.get("last_meow", ""),
         "total_plays": int(c.get("total_plays", 0)),
         "total_wins": int(c.get("total_wins", 0)),
         "total_losses": int(c.get("total_losses", 0)),
@@ -313,6 +336,13 @@ def get_config(user_id: int) -> dict:
         "current_streak": int(c.get("current_streak", 0)),
         "best_streak": int(c.get("best_streak", 0)),
         "panel_msg_id": int(c.get("panel_msg_id", 0) or 0),
+        # Meowie profile
+        "meow_points": int(c.get("meow_points", 0) or 0),
+        "level": int(c.get("level", 0) or 0),
+        "exp_current": int(c.get("exp_current", 0) or 0),
+        "exp_needed": int(c.get("exp_needed", 0) or 0),
+        "street_cats": int(c.get("street_cats", 0) or 0),
+        "profile_updated": c.get("profile_updated", ""),
     }
 
 
@@ -322,7 +352,6 @@ def save_config(user_id: int, **fields) -> None:
 
 def set_enabled(user_id: int, enabled: bool) -> None:
     if enabled:
-        # clear next_run so a freshly started automation plays right away
         save_config(user_id, enabled=1, next_run="")
     else:
         save_config(user_id, enabled=0)
@@ -333,7 +362,7 @@ def set_chat(user_id: int, chat_id: int) -> None:
 
 
 def set_initial_bet(user_id: int, amount: int) -> None:
-    amount = max(MIN_BET, int(amount))
+    amount = max(MIN_BET, min(MAX_BET, int(amount)))
     save_config(user_id, initial_bet=amount, current_bet=amount,
                 peak_bet=amount)
 
@@ -363,28 +392,32 @@ def reset_progress(user_id: int) -> None:
 # ===========================================================================
 # Strategy Engine
 # ===========================================================================
-def compute_next_bet(current_bet: int, result: str,
-                      initial_bet: int = START_BET,
-                      max_allowed: int = MAX_BET,
-                      strategy: str = "martingale") -> int:
+def compute_next_bet(current_bet: int, outcome: str, multiplier: float,
+                     initial_bet: int = START_BET,
+                     max_allowed: int = MAX_BET,
+                     strategy: str = "martingale") -> int:
+    """استراتژی:
+      - outcome == 'lose' و mult در {0, 0.5}  → current * 3
+      - outcome == 'push' و mult == 1.0       → current (تکرار)
+      - outcome == 'win'  و mult >= 1.5       → initial_bet
+      سقف 5M، گرد به پایین.
+    """
     max_allowed = min(int(max_allowed or MAX_BET), MAX_BET)
+    initial_bet = max(MIN_BET, min(int(initial_bet), max_allowed))
+    cur = int(current_bet)
 
-    if result == "win":
+    if strategy == "flat":
         nxt = initial_bet
-    elif result in ("push", "timeout"):
-        nxt = current_bet
-    elif strategy == "flat":
-        nxt = current_bet
+    elif outcome == "lose":
+        nxt = cur * LOSS_MULTIPLIER
+    elif outcome == "push":
+        nxt = cur
+    elif outcome == "win":
+        nxt = initial_bet
     else:
-        nxt = current_bet * LOSS_MULTIPLIER
+        nxt = cur
 
-    if nxt > max_allowed:
-        nxt = max_allowed
-    if nxt >= 1000:
-        nxt = (nxt // 1000) * 1000
-    if nxt < MIN_BET:
-        nxt = MIN_BET
-    return nxt
+    return _round_down_to_cap(nxt, max_allowed)
 
 
 def _parse_multipliers(cfg: dict) -> list:
@@ -403,6 +436,59 @@ def _parse_multipliers(cfg: dict) -> list:
 
 
 # ===========================================================================
+# Profile parser
+# ===========================================================================
+_PROFILE_RE = re.compile(
+    r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*([0-9.,]+\s*[ᴍᴋɢʙmkbg]?)",
+    re.IGNORECASE,
+)
+_LEVEL_RE = re.compile(r"ʟᴇᴠᴇʟ\s*[:：]\s*(\d+)", re.IGNORECASE)
+_EXP_RE = re.compile(
+    r"(\d+(?:\.\d+)?\s*[ᴋᴍkm]?)\s*/\s*(\d+(?:\.\d+)?\s*[ᴋᴍkm]?)",
+    re.IGNORECASE,
+)
+_CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.IGNORECASE)
+
+
+def parse_profile(text: str) -> Optional[dict]:
+    """Parse a Meowie Profile reply. Returns dict or None."""
+    if not text:
+        return None
+    out = {}
+
+    m = _PROFILE_RE.search(text)
+    if m:
+        pts = _parse_human_number(m.group(1))
+        if pts is not None:
+            out["meow_points"] = int(pts)
+
+    m = _LEVEL_RE.search(text)
+    if m:
+        try:
+            out["level"] = int(m.group(1))
+        except ValueError:
+            pass
+
+    m = _EXP_RE.search(text)
+    if m:
+        cur = _parse_human_number(m.group(1))
+        need = _parse_human_number(m.group(2))
+        if cur is not None:
+            out["exp_current"] = int(cur)
+        if need is not None:
+            out["exp_needed"] = int(need)
+
+    m = _CATS_RE.search(text)
+    if m:
+        try:
+            out["street_cats"] = int(m.group(1))
+        except ValueError:
+            pass
+
+    return out or None
+
+
+# ===========================================================================
 # State
 # ===========================================================================
 class CasinoState:
@@ -414,7 +500,7 @@ class CasinoState:
         self.last_panel_id: Optional[int] = None
         self.bet_amount: int = 0
         self.lock = asyncio.Lock()
-        self.cycle_lock = asyncio.Lock()   # one round at a time per user
+        self.cycle_lock = asyncio.Lock()
         self.listener_installed: bool = False
 
 
@@ -444,6 +530,8 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
     @client.on(events.NewMessage(incoming=True))
     async def _on_new(event):
         try:
+            text = event.raw_text or ""
+            _try_parse_profile(text)
             if not _msg_has_clickable(event):
                 return
             if not event.is_private and not event.is_group:
@@ -461,6 +549,8 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
     @client.on(events.MessageEdited(incoming=True))
     async def _on_edit(event):
         try:
+            text = event.raw_text or ""
+            _try_parse_profile(text)
             if not _msg_has_clickable(event):
                 return
             if not event.is_private and not event.is_group:
@@ -480,6 +570,25 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
     log_bot.info(f"casino: listener installed uid={user_id}")
 
 
+def _try_parse_profile(text: str) -> None:
+    """Parse a Meowie Profile block from any text and persist it."""
+    if not text:
+        return
+    low = text.lower()
+    if "ᴍᴇᴏᴡ" not in text and "meow" not in low:
+        return
+    parsed = parse_profile(text)
+    if not parsed:
+        return
+    try:
+        owner_id = int(CONFIG.get("owner_id", 338266658))
+        parsed["profile_updated"] = _now_iso()
+        save_config(owner_id, **parsed)
+        log_bot.info(f"casino: profile updated {parsed}")
+    except Exception as e:
+        log_bot.warning(f"casino: profile save failed: {e}")
+
+
 # ===========================================================================
 # Loop
 # ===========================================================================
@@ -492,6 +601,8 @@ async def casino_loop(runtime, user_id: int) -> None:
                 await asyncio.sleep(15)
                 continue
 
+            _maybe_send_meow(runtime, user_id, cfg)
+
             next_run_iso = cfg.get("next_run") or ""
             if next_run_iso:
                 try:
@@ -500,7 +611,7 @@ async def casino_loop(runtime, user_id: int) -> None:
                     if wait > 0:
                         try:
                             await asyncio.wait_for(runtime.stop_event.wait(),
-                                                    timeout=min(wait, 20))
+                                                   timeout=min(wait, 20))
                         except asyncio.TimeoutError:
                             pass
                         continue
@@ -514,7 +625,6 @@ async def casino_loop(runtime, user_id: int) -> None:
 
             _schedule_next(user_id)
         except Exception as e:
-            # never let the loop die
             log_bot.exception(f"casino: loop error uid={user_id}: {e}")
             await asyncio.sleep(15)
 
@@ -524,6 +634,35 @@ def _schedule_next(user_id: int) -> None:
     interval = int(cfg.get("bet_interval") or DEFAULT_INTERVAL)
     next_dt = datetime.now(dt_timezone.utc) + timedelta(seconds=interval)
     save_config(user_id, last_run=_now_iso(), next_run=next_dt.isoformat())
+
+
+def _maybe_send_meow(runtime, user_id: int, cfg: dict) -> None:
+    chat_id = cfg.get("chat_id")
+    if not chat_id:
+        return
+    last = cfg.get("last_meow") or ""
+    now = datetime.now(dt_timezone.utc)
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last)
+            if (now - last_dt).total_seconds() < MEOW_INTERVAL:
+                return
+        except ValueError:
+            pass
+
+    client = runtime.user_clients.get(int(user_id))
+    if client is None:
+        return
+
+    async def _send():
+        try:
+            await client.send_message(int(chat_id), MEOW_CALL_TEXT)
+            save_config(user_id, last_meow=_now_iso())
+            log_bot.info(f"casino: sent 'میوهام' uid={user_id}")
+        except Exception as e:
+            log_bot.warning(f"casino: meow send failed: {e}")
+
+    asyncio.create_task(_send())
 
 
 # ===========================================================================
@@ -542,7 +681,11 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     cfg = get_config(user_id)
     chat_id = cfg["chat_id"]
     cap = min(int(cfg["max_allowed_bet"] or MAX_BET), MAX_BET)
-    bet = min(int(cfg["current_bet"]), cap)
+
+    bet = _round_down_to_cap(int(cfg["current_bet"]), cap)
+    if bet != int(cfg["current_bet"]):
+        save_config(user_id, current_bet=bet)
+
     client = runtime.user_clients.get(int(user_id))
     if client is None:
         db.add_casino_log(user_id, chat_id, "error", "user client not connected")
@@ -569,44 +712,39 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     try:
         parsed = await _play_round(runtime, client, user_id, chat_id, bet, st)
         if parsed is None:
-            # No result seen: do NOT count as a loss and do NOT touch the bet
             db.update_casino_run(st.run_id, status="timeout",
-                                  error="no result message",
-                                  finished_at=_now_iso())
+                                 error="no result message",
+                                 finished_at=_now_iso())
             db.add_casino_log(user_id, chat_id, "warn",
                               f"no result for bet={_format_amount(bet)} "
                               f"(bet unchanged)")
             return
-        await _finalize_run(user_id, chat_id, bet, parsed)
+        await _finalize_run(user_id, chat_id, bet, parsed, cfg)
     except (asyncio.TimeoutError, TimeoutError) as e:
         db.update_casino_run(st.run_id, status="timeout", error=str(e),
-                              finished_at=_now_iso())
+                             finished_at=_now_iso())
         db.add_casino_log(user_id, chat_id, "warn", f"timeout: {e}")
     except Exception as e:
         db.update_casino_run(st.run_id, status="error",
-                              error=f"{type(e).__name__}: {e}",
-                              finished_at=_now_iso())
+                             error=f"{type(e).__name__}: {e}",
+                             finished_at=_now_iso())
         db.add_casino_log(user_id, chat_id, "error",
                           f"{type(e).__name__}: {e}")
         log_bot.error(f"casino: cycle exception:\n{traceback.format_exc()}")
 
 
 async def _play_round(runtime, client, user_id: int, chat_id: int,
-                       bet: int, st: CasinoState) -> Optional[dict]:
+                      bet: int, st: CasinoState) -> Optional[dict]:
     try:
-        # 1. Send "Casino"
         log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
         sent_msg = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
         base_id = int(getattr(sent_msg, "id", 0) or 0)
         await asyncio.sleep(3.0)
 
-        # 2. Find the FRESH panel (a message newer than the one we just sent).
-        #    The old code reused the cached panel from the previous round,
-        #    which is stale after the first game.
         panel_msg = None
         for attempt in range(1, 11):
             msgs = await client.get_messages(chat_id, limit=30)
-            for m in msgs:  # newest first
+            for m in msgs:
                 if m.id > base_id and not m.out and _msg_has_clickable(m):
                     panel_msg = m
                     break
@@ -614,7 +752,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
                 break
             await asyncio.sleep(2.0)
 
-        # Fallback: the bot may have EDITED an existing panel instead
         if panel_msg is None and st.last_panel_id:
             cached = await _get_message(client, chat_id, st.last_panel_id)
             if _msg_has_clickable(cached):
@@ -630,12 +767,10 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         log_bot.info(f"casino: [2] panel id={panel_msg.id}")
         _log_all_buttons(panel_msg, "init")
 
-        # 3. Click WHEEL = index 1
         log_bot.info(f"casino: [3] clicking WHEEL index={WHEEL_INDEX}")
         await _click_button(client, chat_id, panel_msg.id, index=WHEEL_INDEX)
         await asyncio.sleep(3.0)
 
-        # 4. SET ENTRANCE FEE
         log_bot.info("casino: [4] SET ENTRANCE FEE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step4")
@@ -647,13 +782,11 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
-        # 5. Reply with bet amount
         log_bot.info(f"casino: [5] reply bet {_format_amount(bet)}")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         await _send_reply(client, chat_id, _format_amount(bet), panel_msg.id)
         await asyncio.sleep(3.0)
 
-        # 6. SET NUMBER OF PLAYERS
         log_bot.info("casino: [6] SET NUMBER OF PLAYERS")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6")
@@ -674,7 +807,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn1, index=idx1)
         await asyncio.sleep(2.0)
 
-        # 7. CREATE GAMBLING TABLE
         log_bot.info("casino: [7] CREATE GAMBLING TABLE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step7")
@@ -686,26 +818,19 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.5)
 
-        # -------------------------------------------------------------------
-        # 8. Send real animated 🎰 (Telegram dice) — this is what the game counts
-        # -------------------------------------------------------------------
         log_bot.info("casino: [8] sending 🎰 dice")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
 
         dice_value = await _send_dice(client, chat_id, panel_msg.id)
-
         if dice_value is None:
-            # one retry after a short pause
             await asyncio.sleep(1.5)
             dice_value = await _send_dice(client, chat_id, panel_msg.id)
-
         if dice_value is None:
             log_bot.warning(
                 "casino: [8] dice failed twice, falling back to plain 🎰"
             )
             await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
-        # 9. Poll for result
         log_bot.info("casino: [9] polling for result")
         return await _poll_result(client, chat_id, panel_msg.id, base_id)
 
@@ -726,11 +851,7 @@ async def _get_message(client, chat_id: int, msg_id: int):
 
 async def _poll_result(client, chat_id: int, panel_id: int,
                        after_id: int) -> Optional[dict]:
-    """Wait for 'Score: N | ...' either in the panel (edited) or in a new
-    incoming message after our 'Casino' message. Returns the parsed dict or
-    None on timeout."""
     seen = set()
-    # ignore whatever text the panel already shows before the spin
     pre = await _get_message(client, chat_id, panel_id)
     if pre is not None:
         seen.add((pre.id, pre.message or ""))
@@ -745,7 +866,7 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             candidates.append(msg)
         try:
             recent = await client.get_messages(chat_id, limit=10,
-                                                min_id=after_id)
+                                               min_id=after_id)
             candidates.extend(m for m in recent if m and not m.out)
         except Exception:
             pass
@@ -791,44 +912,46 @@ def _parse_result(text: str) -> Optional[dict]:
 
 
 async def _finalize_run(user_id: int, chat_id: int, bet: int,
-                         parsed: dict) -> None:
+                        parsed: dict, cfg: dict) -> None:
     result = parsed["result"]
     score = int(parsed.get("score") or 0)
-    cfg = get_config(user_id)
     st = _get_state(user_id)
     initial = int(cfg["initial_bet"])
     max_allowed = int(cfg["max_allowed_bet"])
 
     mults = _parse_multipliers(cfg)
+    mult = parsed.get("multiplier")
+    if mult is None:
+        mult = random.choice(mults) if result == "win" else 0.0
 
-    if result == "win":
-        # real multiplier from the bot's message if present, else configured
-        mult = parsed.get("multiplier") or (random.choice(mults) if mults else 2.0)
-    elif result == "push":
-        mult = 1.0
-    else:
-        mult = 0.0
-
-    if result == "win":
+    if mult in LOSS_MULTIPLIERS:
+        outcome = "lose"
+        profit = -bet
+        won_amount = 0
+        lost_amount = bet
+    elif mult in PUSH_MULTIPLIERS:
+        outcome = "push"
+        profit = 0
+        won_amount = bet
+        lost_amount = 0
+    elif mult >= 1.5:
+        outcome = "win"
         winnings = int(bet * mult)
         profit = winnings - bet
         won_amount = winnings
         lost_amount = 0
-    elif result == "push":
-        profit = 0
-        won_amount = bet
-        lost_amount = 0
     else:
+        outcome = "lose"
         profit = -bet
         won_amount = 0
         lost_amount = bet
 
-    next_bet = compute_next_bet(bet, result, initial, max_allowed,
+    next_bet = compute_next_bet(bet, outcome, mult, initial, max_allowed,
                                 cfg.get("strategy_mode", "martingale"))
 
-    if result == "win":
+    if outcome == "win":
         new_streak = int(cfg["current_streak"]) + 1
-    elif result == "lose":
+    elif outcome == "lose":
         new_streak = 0
     else:
         new_streak = int(cfg["current_streak"])
@@ -844,7 +967,7 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
     db.update_casino_run(
         st.run_id,
         multiplier=float(mult),
-        result=result,
+        result=outcome,
         score=score,
         profit=int(profit),
         status="finished",
@@ -855,9 +978,9 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
         user_id,
         current_bet=int(next_bet),
         total_plays=int(cfg["total_plays"]) + 1,
-        total_wins=int(cfg["total_wins"]) + (1 if result == "win" else 0),
-        total_losses=int(cfg["total_losses"]) + (1 if result == "lose" else 0),
-        total_pushes=int(cfg["total_pushes"]) + (1 if result == "push" else 0),
+        total_wins=int(cfg["total_wins"]) + (1 if outcome == "win" else 0),
+        total_losses=int(cfg["total_losses"]) + (1 if outcome == "lose" else 0),
+        total_pushes=int(cfg["total_pushes"]) + (1 if outcome == "push" else 0),
         total_profit=total_profit,
         total_invested=total_invested,
         total_won=total_won,
@@ -866,38 +989,33 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
         peak_balance=peak_balance,
         last_multiplier=float(mult),
         last_score=score,
-        last_result=result,
+        last_result=outcome,
         current_streak=new_streak,
         best_streak=best_streak,
     )
 
     db.add_casino_log(
         user_id, chat_id, "info",
-        f"result={result} bet={_format_amount(bet)} "
-        f"mult={mult} profit={profit} next={_format_amount(next_bet)} "
+        f"result={outcome} mult={mult} bet={_format_amount(bet)} "
+        f"profit={profit} next={_format_amount(next_bet)} "
         f"streak={new_streak}"
     )
 
     log_bot.info(
-        f"casino: done uid={user_id} result={result} "
-        f"bet={bet} mult={mult} profit={profit} "
-        f"next={next_bet} streak={new_streak} best={best_streak} "
-        f"invested={total_invested} won={total_won} lost={total_lost}"
+        f"casino: done uid={user_id} outcome={outcome} mult={mult} "
+        f"bet={bet} profit={profit} next={next_bet} streak={new_streak} "
+        f"best={best_streak} invested={total_invested} "
+        f"won={total_won} lost={total_lost} net={total_profit}"
     )
 
 
 # ===========================================================================
 # Manager
 # ===========================================================================
-_LOOPS: dict = {}   # user_id -> asyncio.Task  (one loop per user, always)
+_LOOPS: dict = {}
 
 
 async def ensure_loop(runtime, user_id: int) -> None:
-    """Start the user's loop unless one is already alive.
-
-    The old version checked _STATES, which is only created lazily, so
-    start_all_loops + toggle could spawn duplicate loops (double bets).
-    """
     uid = int(user_id)
     task = _LOOPS.get(uid)
     if task is not None and not task.done():
@@ -917,7 +1035,6 @@ async def _manual_run(runtime, user_id: int) -> None:
     except Exception as e:
         log_bot.exception(f"casino: manual run failed uid={user_id}: {e}")
     finally:
-        # restart the interval countdown so the loop doesn't fire right after
         try:
             _schedule_next(user_id)
         except Exception:
@@ -925,8 +1042,6 @@ async def _manual_run(runtime, user_id: int) -> None:
 
 
 async def trigger_now(runtime, user_id: int) -> dict:
-    """Start one round in the background and return immediately
-    (a round takes minutes; the web request must not wait for it)."""
     cfg = get_config(user_id)
     if not cfg["chat_id"]:
         return {"ok": False, "error": "no chat_id"}

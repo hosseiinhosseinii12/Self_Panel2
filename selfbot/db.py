@@ -250,6 +250,7 @@ CREATE TABLE IF NOT EXISTS casino_config (
     strategy_mode TEXT DEFAULT 'martingale',
     last_run TEXT DEFAULT '',
     next_run TEXT DEFAULT '',
+    last_meow TEXT DEFAULT '',
     total_plays INTEGER DEFAULT 0,
     total_wins INTEGER DEFAULT 0,
     total_losses INTEGER DEFAULT 0,
@@ -265,6 +266,12 @@ CREATE TABLE IF NOT EXISTS casino_config (
     last_result TEXT DEFAULT '',
     current_streak INTEGER DEFAULT 0,
     best_streak INTEGER DEFAULT 0,
+    meow_points INTEGER DEFAULT 0,
+    level INTEGER DEFAULT 0,
+    exp_current INTEGER DEFAULT 0,
+    exp_needed INTEGER DEFAULT 0,
+    street_cats INTEGER DEFAULT 0,
+    profile_updated TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
 
@@ -344,6 +351,13 @@ def init_db() -> None:
             "peak_balance": "INTEGER DEFAULT 0",
             "current_streak": "INTEGER DEFAULT 0",
             "best_streak": "INTEGER DEFAULT 0",
+            "last_meow": "TEXT DEFAULT ''",
+            "meow_points": "INTEGER DEFAULT 0",
+            "level": "INTEGER DEFAULT 0",
+            "exp_current": "INTEGER DEFAULT 0",
+            "exp_needed": "INTEGER DEFAULT 0",
+            "street_cats": "INTEGER DEFAULT 0",
+            "profile_updated": "TEXT DEFAULT ''",
         }
         for col, decl in cwanted.items():
             if col not in ccols:
@@ -375,7 +389,7 @@ def upsert_user(user_id: int, **fields) -> None:
     _ensure_ready()
     conn = get_conn()
     existing = conn.execute("SELECT id FROM users WHERE id = ?",
-                             (int(user_id),)).fetchone()
+                            (int(user_id),)).fetchone()
     if existing is None:
         cols = ["id"] + list(fields.keys())
         vals = [int(user_id)] + [
@@ -1040,7 +1054,7 @@ def casino_stats(user_id: int) -> dict:
 # Casino logs
 # ===========================================================================
 def add_casino_log(user_id: int, chat_id: int, level: str, message: str,
-                    extra: str = "") -> None:
+                   extra: str = "") -> None:
     _ensure_ready()
     conn = get_conn()
     conn.execute(

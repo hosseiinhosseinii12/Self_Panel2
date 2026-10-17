@@ -1,6 +1,9 @@
 """HTML templates for the Casino automator panel (admin + user)."""
 
 
+# ===========================================================================
+# ADMIN
+# ===========================================================================
 CASINO_ADMIN_TEMPLATE = r"""
 <div class="page-head">
   <div>
@@ -17,6 +20,51 @@ CASINO_ADMIN_TEMPLATE = r"""
   </div>
 </div>
 
+{% with msgs = get_flashed_messages(with_categories=true) %}
+  {% for cat, msg in msgs %}
+    <div class="flash {{ 'err' if cat=='error' else '' }}">{{ msg }}</div>
+  {% endfor %}
+{% endwith %}
+
+<!-- ======================= Meowie profile ======================= -->
+<div class="card">
+  <h2>Meowie profile <span class="sub">parsed from replies</span></h2>
+  <div class="stats" style="margin-bottom:0">
+    <div class="stat">
+      <div class="k">Meow Points</div>
+      <div class="v" style="font-size:22px">
+        {{ '{:,.2f}'.format(cfg.meow_points / 1000000) }}<small>M</small>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="k">Level</div>
+      <div class="v" style="font-size:22px">{{ cfg.level }}</div>
+    </div>
+    <div class="stat">
+      <div class="k">Level EXP</div>
+      <div class="v" style="font-size:17px">
+        {{ '{:,.2f}'.format(cfg.exp_current / 1000) }}k
+        /
+        {{ '{:,.2f}'.format(cfg.exp_needed / 1000) }}k
+      </div>
+    </div>
+    <div class="stat">
+      <div class="k">Street Cats</div>
+      <div class="v" style="font-size:22px">{{ cfg.street_cats }}</div>
+    </div>
+  </div>
+  {% if cfg.profile_updated %}
+  <div class="muted mt-2" style="font-size:12px">
+    Last updated: {{ cfg.profile_updated[:19] }}
+  </div>
+  {% else %}
+  <div class="muted mt-2" style="font-size:12px">
+    No profile reply received yet. Send the Meowie profile once to seed it.
+  </div>
+  {% endif %}
+</div>
+
+<!-- ======================= Stats ======================= -->
 <div class="stats">
   <div class="stat">
     <div class="k">Plays</div>
@@ -31,13 +79,23 @@ CASINO_ADMIN_TEMPLATE = r"""
     <div class="v" style="color:var(--red)">{{ stats.losses }}</div>
   </div>
   <div class="stat">
-    <div class="k">Profit</div>
-    <div class="v" style="color:{% if stats.profit >= 0 %}var(--green){% else %}var(--red){% endif %}">
-      {{ '{:+,}'.format(stats.profit) }}
+    <div class="k">Pushes (1x)</div>
+    <div class="v" style="color:var(--amber)">{{ stats.pushes }}</div>
+  </div>
+  <div class="stat">
+    <div class="k">Net profit</div>
+    <div class="v"
+         style="color:{% if cfg.total_profit >= 0 %}var(--green){% else %}var(--red){% endif %}">
+      {{ '{:+,}'.format(cfg.total_profit) }}
     </div>
+  </div>
+  <div class="stat">
+    <div class="k">Peak profit</div>
+    <div class="v">{{ '{:+,}'.format(cfg.peak_balance) }}</div>
   </div>
 </div>
 
+<!-- ======================= Config + Controls ======================= -->
 <div class="grid-2">
   <div class="card">
     <h2>Configuration</h2>
@@ -50,25 +108,25 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Initial bet</label>
+          <label>Initial bet (1000 – 5,000,000)</label>
           <input type="number" name="initial_bet"
-                 value="{{ cfg.initial_bet }}" min="1">
+                 value="{{ cfg.initial_bet }}" min="1000" max="5000000">
         </div>
         <div>
-          <label>Max bet</label>
+          <label>Max bet (cap 5,000,000)</label>
           <input type="number" name="max_bet"
-                 value="{{ cfg.max_bet }}" min="1">
+                 value="{{ cfg.max_bet }}" min="1000" max="5000000">
         </div>
       </div>
 
       <div class="field-row mt-3">
         <div>
-          <label>Interval (seconds)</label>
+          <label>Interval (seconds, ≥ 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60">
         </div>
         <div>
-          <label>Multipliers (comma-separated)</label>
+          <label>Winning multipliers</label>
           <input type="text" name="multipliers"
                  value="{{ cfg.multipliers }}">
         </div>
@@ -78,13 +136,19 @@ CASINO_ADMIN_TEMPLATE = r"""
       <select name="strategy_mode">
         <option value="martingale"
                 {% if cfg.strategy_mode == 'martingale' %}selected{% endif %}>
-          Martingale (multiply on loss)
+          Martingale v2 (×3 on 0x / 0.5x, repeat on 1x, reset on win)
         </option>
         <option value="flat"
                 {% if cfg.strategy_mode == 'flat' %}selected{% endif %}>
-          Flat (same bet every time)
+          Flat (always initial bet)
         </option>
       </select>
+
+      <div class="muted mt-3" style="font-size:12px;line-height:1.6">
+        <strong>Strategy:</strong>
+        0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
+        Bets above 5,000,000 are rounded DOWN to 5,000,000.
+      </div>
 
       <div class="mt-4">
         <button class="btn btn-primary">Save configuration</button>
@@ -132,14 +196,30 @@ CASINO_ADMIN_TEMPLATE = r"""
       <div class="table-wrap" style="border:none;box-shadow:none">
         <table>
           <tbody>
-            <tr><td class="muted">Current bet</td>
-                <td class="mono text-right">{{ cfg.current_bet }}</td></tr>
+            <tr><td class="muted">Next bet (current)</td>
+                <td class="mono text-right">{{ '{:,}'.format(cfg.current_bet) }}</td></tr>
             <tr><td class="muted">Peak bet</td>
-                <td class="mono text-right">{{ cfg.peak_bet }}</td></tr>
+                <td class="mono text-right">{{ '{:,}'.format(cfg.peak_bet) }}</td></tr>
+            <tr><td class="muted">Streak (best)</td>
+                <td class="mono text-right">
+                  {{ cfg.current_streak }} ({{ cfg.best_streak }})
+                </td></tr>
+            <tr><td class="muted">Invested</td>
+                <td class="mono text-right">{{ '{:,}'.format(cfg.total_invested) }}</td></tr>
+            <tr><td class="muted">Total won</td>
+                <td class="mono text-right" style="color:var(--green)">
+                  {{ '{:+,}'.format(cfg.total_won) }}
+                </td></tr>
+            <tr><td class="muted">Total lost</td>
+                <td class="mono text-right" style="color:var(--red)">
+                  {{ '{:+,}'.format(cfg.total_lost) }}
+                </td></tr>
             <tr><td class="muted">Last run</td>
                 <td class="mono text-right">{{ cfg.last_run[:19] or '—' }}</td></tr>
             <tr><td class="muted">Next run</td>
                 <td class="mono text-right">{{ cfg.next_run[:19] or '—' }}</td></tr>
+            <tr><td class="muted">Last "میوهام"</td>
+                <td class="mono text-right">{{ cfg.last_meow[:19] or '—' }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -147,6 +227,7 @@ CASINO_ADMIN_TEMPLATE = r"""
   </div>
 </div>
 
+<!-- ======================= Recent runs ======================= -->
 <div class="card">
   <h2>Recent runs <span class="sub">{{ runs|length }}</span></h2>
   <div class="table-wrap">
@@ -161,14 +242,14 @@ CASINO_ADMIN_TEMPLATE = r"""
       {% for r in runs %}
       <tr>
         <td class="mono muted">{{ r.started_at[:19] }}</td>
-        <td class="mono">{{ r.bet_amount }}</td>
+        <td class="mono">{{ '{:,}'.format(r.bet_amount) }}</td>
         <td>
           {% if r.result == 'win' %}<span class="badge green">win</span>
           {% elif r.result == 'lose' %}<span class="badge red">lose</span>
           {% elif r.result == 'push' %}<span class="badge amber">push</span>
           {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
         </td>
-        <td class="mono">{{ r.multiplier }}</td>
+        <td class="mono">{{ r.multiplier }}x</td>
         <td class="mono">{{ r.score }}</td>
         <td class="mono text-right"
             style="color:{% if r.profit >= 0 %}var(--green){% else %}var(--red){% endif %}">
@@ -183,6 +264,7 @@ CASINO_ADMIN_TEMPLATE = r"""
   </div>
 </div>
 
+<!-- ======================= Logs ======================= -->
 <div class="card">
   <h2>Logs <span class="sub">{{ logs|length }}</span></h2>
   <div class="table-wrap">
@@ -211,6 +293,9 @@ CASINO_ADMIN_TEMPLATE = r"""
 """
 
 
+# ===========================================================================
+# USER
+# ===========================================================================
 CASINO_USER_TEMPLATE = r"""
 <div class="page-head">
   <div>
@@ -233,6 +318,45 @@ CASINO_USER_TEMPLATE = r"""
   {% endfor %}
 {% endwith %}
 
+<!-- ======================= Meowie profile ======================= -->
+<div class="card">
+  <h2>My Meowie profile <span class="sub">parsed from replies</span></h2>
+  <div class="stats" style="margin-bottom:0">
+    <div class="stat">
+      <div class="k">Meow Points</div>
+      <div class="v" style="font-size:22px">
+        {{ '{:,.2f}'.format(cfg.meow_points / 1000000) }}<small>M</small>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="k">Level</div>
+      <div class="v" style="font-size:22px">{{ cfg.level }}</div>
+    </div>
+    <div class="stat">
+      <div class="k">Level EXP</div>
+      <div class="v" style="font-size:17px">
+        {{ '{:,.2f}'.format(cfg.exp_current / 1000) }}k
+        /
+        {{ '{:,.2f}'.format(cfg.exp_needed / 1000) }}k
+      </div>
+    </div>
+    <div class="stat">
+      <div class="k">Street Cats</div>
+      <div class="v" style="font-size:22px">{{ cfg.street_cats }}</div>
+    </div>
+  </div>
+  {% if cfg.profile_updated %}
+  <div class="muted mt-2" style="font-size:12px">
+    Last updated: {{ cfg.profile_updated[:19] }}
+  </div>
+  {% else %}
+  <div class="muted mt-2" style="font-size:12px">
+    Send the Meowie profile reply once so the bot can parse it.
+  </div>
+  {% endif %}
+</div>
+
+<!-- ======================= Stats ======================= -->
 <div class="stats">
   <div class="stat">
     <div class="k">Plays</div>
@@ -247,16 +371,22 @@ CASINO_USER_TEMPLATE = r"""
     <div class="v" style="color:var(--red)">{{ stats.losses }}</div>
   </div>
   <div class="stat">
-    <div class="k">Profit</div>
-    <div class="v" style="color:{% if stats.profit >= 0 %}var(--green){% else %}var(--red){% endif %}">
-      {{ '{:+,}'.format(stats.profit) }}
+    <div class="k">Pushes (1x)</div>
+    <div class="v" style="color:var(--amber)">{{ stats.pushes }}</div>
+  </div>
+  <div class="stat">
+    <div class="k">Net profit</div>
+    <div class="v"
+         style="color:{% if cfg.total_profit >= 0 %}var(--green){% else %}var(--red){% endif %}">
+      {{ '{:+,}'.format(cfg.total_profit) }}
     </div>
   </div>
 </div>
 
+<!-- ======================= Config + Controls ======================= -->
 <div class="grid-2">
   <div class="card">
-    <h2>Your configuration</h2>
+    <h2>My configuration</h2>
     <form method="post" action="{{ url_for('user.casino_save') }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
 
@@ -270,17 +400,23 @@ CASINO_USER_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Initial bet</label>
+          <label>Initial bet (1000 – 5,000,000)</label>
           <input type="number" name="initial_bet"
-                 value="{{ cfg.initial_bet }}" min="1"
+                 value="{{ cfg.initial_bet }}" min="1000" max="5000000"
                  {% if not can_edit_bet %}disabled{% endif %}>
         </div>
         <div>
-          <label>Interval (seconds)</label>
+          <label>Interval (seconds, ≥ 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60"
                  {% if not can_edit_interval %}disabled{% endif %}>
         </div>
+      </div>
+
+      <div class="muted mt-3" style="font-size:12px;line-height:1.6">
+        <strong>Strategy:</strong>
+        0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
+        Bets above 5,000,000 are rounded DOWN to 5,000,000.
       </div>
 
       <div class="mt-4">
@@ -313,10 +449,14 @@ CASINO_USER_TEMPLATE = r"""
       <div class="table-wrap" style="border:none;box-shadow:none">
         <table>
           <tbody>
-            <tr><td class="muted">Current bet</td>
-                <td class="mono text-right">{{ cfg.current_bet }}</td></tr>
+            <tr><td class="muted">Next bet</td>
+                <td class="mono text-right">{{ '{:,}'.format(cfg.current_bet) }}</td></tr>
             <tr><td class="muted">Peak bet</td>
-                <td class="mono text-right">{{ cfg.peak_bet }}</td></tr>
+                <td class="mono text-right">{{ '{:,}'.format(cfg.peak_bet) }}</td></tr>
+            <tr><td class="muted">Streak (best)</td>
+                <td class="mono text-right">
+                  {{ cfg.current_streak }} ({{ cfg.best_streak }})
+                </td></tr>
             <tr><td class="muted">Next run</td>
                 <td class="mono text-right">{{ cfg.next_run[:19] or '—' }}</td></tr>
           </tbody>
@@ -326,6 +466,7 @@ CASINO_USER_TEMPLATE = r"""
   </div>
 </div>
 
+<!-- ======================= Recent runs ======================= -->
 <div class="card">
   <h2>Recent runs <span class="sub">{{ runs|length }}</span></h2>
   <div class="table-wrap">
@@ -340,14 +481,14 @@ CASINO_USER_TEMPLATE = r"""
       {% for r in runs %}
       <tr>
         <td class="mono muted">{{ r.started_at[:19] }}</td>
-        <td class="mono">{{ r.bet_amount }}</td>
+        <td class="mono">{{ '{:,}'.format(r.bet_amount) }}</td>
         <td>
           {% if r.result == 'win' %}<span class="badge green">win</span>
           {% elif r.result == 'lose' %}<span class="badge red">lose</span>
           {% elif r.result == 'push' %}<span class="badge amber">push</span>
           {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
         </td>
-        <td class="mono">{{ r.multiplier }}</td>
+        <td class="mono">{{ r.multiplier }}x</td>
         <td class="mono text-right"
             style="color:{% if r.profit >= 0 %}var(--green){% else %}var(--red){% endif %}">
           {{ '{:+,}'.format(r.profit) }}
