@@ -1,26 +1,4 @@
-"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
-
-Strategy (Martingale v2 — فقط روی 0x و 0.5x):
-  - Initial bet قابل ویرایش (پیش‌فرض 100,000)
-  - نتیجه 0x یا 0.5x  → bet = bet * 3
-  - نتیجه 1x          → bet = bet (تکرار)
-  - نتیجه برد (>=1.5) → bet = initial_bet
-  - سقف سخت: 5,000,000 — هر عدد بالاتر به 5M گرد می‌شود (round DOWN)
-  - هر شرط باید REPLY به پیام پنل Meowie باشد
-
-ترتیب ارسال:
-  - اگر زمان «میوهام» رسیده باشد (یا last_meow خالی/قدیمی باشد):
-    «میوهام» → 15 ثانیه صبر → «Casino»
-  - در غیر این صورت مستقیماً «Casino»
-
-Profile (از پاسخ پنل Meowie پارس می‌شود):
-  - Meow Points  → meow_points
-  - Level        → level
-  - Level EXP    → exp_current / exp_needed
-  - Street Cats  → street_cats
-
-همه در casino_config ذخیره و در پنل وب نمایش داده می‌شود.
-"""
+"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune."""
 import asyncio
 import random
 import re
@@ -50,8 +28,8 @@ EMOJI_TRIGGER = "🎰"
 MEOW_CALL_TEXT = "میوهام"
 
 DEFAULT_INTERVAL = 301
-MEOW_INTERVAL = 600              # default; override per-user via cfg["meow_interval"]
-MEOW_TO_CASINO_DELAY = 15.0      # صبر بعد از «میوهام» قبل از «Casino»
+MEOW_INTERVAL = 600
+MEOW_TO_CASINO_DELAY = 15.0
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 1.5
 
@@ -64,13 +42,11 @@ _INLINE_TYPES = (
 
 WHEEL_INDEX = 1
 
-# Strategy constants
 START_BET = 100_000
 LOSS_MULTIPLIER = 3
 MAX_BET = 5_000_000
 MIN_BET = 1_000
 
-# Classification
 LOSS_MULTIPLIERS = (0.0, 0.5)
 PUSH_MULTIPLIERS = (1.0,)
 
@@ -87,7 +63,6 @@ def _now_iso() -> str:
 
 
 def _format_amount(n: int) -> str:
-    """Exact amount for the game bot (2,700,000 -> '2700k', NOT '2.7m')."""
     n = int(n)
     for unit, suffix in ((1_000_000_000, "g"), (1_000_000, "m"), (1_000, "k")):
         if n >= unit and n % unit == 0:
@@ -96,7 +71,6 @@ def _format_amount(n: int) -> str:
 
 
 def _round_down_to_cap(bet: int, cap: int = MAX_BET) -> int:
-    """Round bet DOWN to a multiple of 1000, never above cap."""
     bet = int(bet)
     if bet > cap:
         bet = cap
@@ -106,7 +80,6 @@ def _round_down_to_cap(bet: int, cap: int = MAX_BET) -> int:
 
 
 def _parse_human_number(s: str) -> Optional[float]:
-    """Parse '23.88ᴍ' -> 23_880_000, '2.75ᴋ' -> 2750, '5.99ᴋ' -> 5990."""
     if not s:
         return None
     s = s.strip().lower()
@@ -127,7 +100,6 @@ def _parse_human_number(s: str) -> Optional[float]:
 
 
 def _parse_profile_value(num_str: str, suffix: str) -> Optional[float]:
-    """Parse '24.34' + 'ᴍ' -> 24_340_000; '2.77' + 'ᴋ' -> 2_770."""
     try:
         v = float((num_str or "").replace(",", ".").strip())
     except ValueError:
@@ -271,7 +243,6 @@ async def _send_reply(client, chat_id: int, text: str, reply_to: int) -> None:
 
 async def _send_dice(client, chat_id: int, reply_to: int,
                      emoticon: str = EMOJI_TRIGGER) -> Optional[int]:
-    """Send a real Telegram dice (animated 🎰) as a reply to the panel."""
     if not HAS_TELETHON:
         return None
 
@@ -358,7 +329,6 @@ def get_config(user_id: int) -> dict:
         "current_streak": int(c.get("current_streak", 0)),
         "best_streak": int(c.get("best_streak", 0)),
         "panel_msg_id": int(c.get("panel_msg_id", 0) or 0),
-        # Meowie profile
         "meow_points": int(c.get("meow_points", 0) or 0),
         "level": int(c.get("level", 0) or 0),
         "exp_current": int(c.get("exp_current", 0) or 0),
@@ -416,18 +386,12 @@ def reset_progress(user_id: int) -> None:
 
 
 # ===========================================================================
-# Strategy Engine
+# Strategy
 # ===========================================================================
 def compute_next_bet(current_bet: int, outcome: str, multiplier: float,
                      initial_bet: int = START_BET,
                      max_allowed: int = MAX_BET,
                      strategy: str = "martingale") -> int:
-    """استراتژی:
-      - outcome == 'lose' و mult در {0, 0.5}  → current * 3
-      - outcome == 'push' و mult == 1.0       → current (تکرار)
-      - outcome == 'win'  و mult >= 1.5       → initial_bet
-      سقف 5M، گرد به پایین.
-    """
     max_allowed = min(int(max_allowed or MAX_BET), MAX_BET)
     initial_bet = max(MIN_BET, min(int(initial_bet), max_allowed))
     cur = int(current_bet)
@@ -468,16 +432,18 @@ _PROFILE_RE = re.compile(
     r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*([ᴍᴋɢʙmkbg])",
     re.IGNORECASE,
 )
-_LEVEL_RE = re.compile(r"ʟᴇᴠᴇʟ\s*[:：]\s*(\d+)", re.IGNORECASE)
+_LEVEL_RE = re.compile(
+    r"ʟᴇᴠᴇʟ\s*[:：]?\s*(\d+)",
+    re.IGNORECASE,
+)
 _EXP_RE = re.compile(
-    r"(\d+(?:[.,]\d+)?\s*[ᴋᴍkm]?)\s*/\s*(\d+(?:[.,]\d+)?\s*[ᴋᴍkm]?)",
+    r"(\d+(?:[.,]\d+)?)\s*([ᴋᴍkm]?)\s*[/\-]\s*(\d+(?:[.,]\d+)?)\s*([ᴋᴍkm]?)",
     re.IGNORECASE,
 )
 _CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.IGNORECASE)
 
 
 def parse_profile(text: str) -> Optional[dict]:
-    """Parse a Meowie Profile reply. Returns dict or None."""
     if not text:
         return None
     out = {}
@@ -497,12 +463,30 @@ def parse_profile(text: str) -> Optional[dict]:
 
     m = _EXP_RE.search(text)
     if m:
-        cur = _parse_human_number(m.group(1))
-        need = _parse_human_number(m.group(2))
-        if cur is not None:
-            out["exp_current"] = int(cur)
-        if need is not None:
-            out["exp_needed"] = int(need)
+        try:
+            cur_val = float(m.group(1).replace(",", "."))
+            cur_suffix = (m.group(2) or "").lower()
+            if cur_suffix in ("ᴋ", "k"):
+                cur_val *= 1000
+            elif cur_suffix in ("ᴍ", "m"):
+                cur_val *= 1_000_000
+            elif cur_suffix in ("ɢ", "g", "ʙ", "b"):
+                cur_val *= 1_000_000_000
+            out["exp_current"] = int(cur_val)
+        except (ValueError, TypeError):
+            pass
+        try:
+            need_val = float(m.group(3).replace(",", "."))
+            need_suffix = (m.group(4) or "").lower()
+            if need_suffix in ("ᴋ", "k"):
+                need_val *= 1000
+            elif need_suffix in ("ᴍ", "m"):
+                need_val *= 1_000_000
+            elif need_suffix in ("ɢ", "g", "ʙ", "b"):
+                need_val *= 1_000_000_000
+            out["exp_needed"] = int(need_val)
+        except (ValueError, TypeError):
+            pass
 
     m = _CATS_RE.search(text)
     if m:
@@ -597,7 +581,6 @@ def install_casino_listener(runtime, user_id: int, client) -> None:
 
 
 def _try_parse_profile(text: str) -> None:
-    """Parse a Meowie Profile block from any text and persist it."""
     if not text:
         return
     low = text.lower()
@@ -662,7 +645,6 @@ def _schedule_next(user_id: int) -> None:
 
 async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
                             force: bool = False) -> bool:
-    """اگر زمان «میوهام» رسیده باشد (یا force=True)، آن را await کن."""
     chat_id = cfg.get("chat_id")
     log_bot.info(
         f"casino: [meow] check uid={user_id} force={force} "
@@ -744,9 +726,6 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     except Exception:
         pass
 
-    # -------------------------------------------------------------------
-    # ۱) منطق force_meow با meow_interval قابل تنظیم
-    # -------------------------------------------------------------------
     meow_interval = int(cfg.get("meow_interval", MEOW_INTERVAL))
     last_meow = cfg.get("last_meow") or ""
     force_meow = False
@@ -794,11 +773,7 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         cfg = get_config(user_id)
         chat_id = cfg["chat_id"]
 
-    # -------------------------------------------------------------------
-    # ۲) حالا کازینو
-    # -------------------------------------------------------------------
     cap = min(int(cfg["max_allowed_bet"] or MAX_BET), MAX_BET)
-
     bet = _round_down_to_cap(int(cfg["current_bet"]), cap)
     if bet != int(cfg["current_bet"]):
         save_config(user_id, current_bet=bet)
@@ -1019,11 +994,9 @@ async def _poll_result(client, chat_id: int, panel_id: int,
 
 
 def _parse_result(text: str) -> Optional[dict]:
-    """Parse Meowie result. Handles many formats."""
     if not text:
         return None
 
-    # نرمال‌سازی حروف یونیکد به ascii
     t = text
     replacements = {
         "ꜱ": "s", "ᴄ": "c", "ᴏ": "o", "ʀ": "r", "ᴇ": "e",
@@ -1037,7 +1010,6 @@ def _parse_result(text: str) -> Optional[dict]:
         t = t.replace(a, b)
     low = t.lower()
 
-    # --- score ---
     score = None
     for pat in (
         r"score\s*[:：=]\s*(\d+)",
@@ -1057,7 +1029,6 @@ def _parse_result(text: str) -> Optional[dict]:
     if score is None:
         return None
 
-    # --- multiplier ---
     mult = None
     for pat in (
         r"multiplier\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*x?",
