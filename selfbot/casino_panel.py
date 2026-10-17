@@ -1,8 +1,4 @@
-﻿"""HTML templates for the Casino automator panel (admin + user).
-
-All datetimes use `_tehran` fields (pre-computed in casino_routes.py)
-to avoid Jinja filter issues. Empty values render as '—'.
-"""
+﻿"""HTML templates for the Casino automator panel (admin + user + export)."""
 
 
 # ===========================================================================
@@ -243,7 +239,11 @@ CASINO_ADMIN_TEMPLATE = r"""
   <h2>
     Recent runs <span class="sub">{{ runs|length }}</span>
   </h2>
-  <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:flex-end">
+  <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+    <a class="btn btn-sm" href="{{ url_for('casino_export_page') }}"
+       style="background:var(--accent);color:var(--accent-fg);border-color:var(--accent)">
+      📥 Export
+    </a>
     <form method="post" action="{{ url_for('casino_clear_runs') }}"
           onsubmit="return confirm('Delete all recent runs? This cannot be undone.');"
           style="display:inline">
@@ -510,7 +510,11 @@ CASINO_USER_TEMPLATE = r"""
   <h2>
     Recent runs <span class="sub">{{ runs|length }}</span>
   </h2>
-  <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:flex-end">
+  <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+    <a class="btn btn-sm" href="{{ url_for('user.casino_export_page') }}"
+       style="background:var(--accent);color:var(--accent-fg);border-color:var(--accent)">
+      📥 Export
+    </a>
     <form method="post" action="{{ url_for('user.casino_clear_runs') }}"
           onsubmit="return confirm('Delete all recent runs? This cannot be undone.');"
           style="display:inline">
@@ -552,4 +556,244 @@ CASINO_USER_TEMPLATE = r"""
     </table>
   </div>
 </div>
+"""
+
+
+# ===========================================================================
+# EXPORT PAGE
+# ===========================================================================
+CASINO_EXPORT_TEMPLATE = r"""
+<div class="page-head">
+  <div>
+    <div class="crumb">Casino / Export</div>
+    <div class="page-title">Export Logs</div>
+    <div class="page-sub">Choose what to include and the output format</div>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="{{ back_url }}">← Back</a>
+  </div>
+</div>
+
+<form id="export-form" onsubmit="return false;">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+
+  <div class="card">
+    <h2>1. Choose filter</h2>
+    <div class="export-grid">
+      <label class="export-option">
+        <input type="radio" name="filter" value="all"
+               {% if filter_mode == 'all' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title">All runs</div>
+          <div class="export-option-count">{{ counts.all }} runs</div>
+        </div>
+      </label>
+
+      <label class="export-option">
+        <input type="radio" name="filter" value="win"
+               {% if filter_mode == 'win' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title" style="color:var(--green)">Wins only</div>
+          <div class="export-option-count">{{ counts.win }} runs</div>
+        </div>
+      </label>
+
+      <label class="export-option">
+        <input type="radio" name="filter" value="lose"
+               {% if filter_mode == 'lose' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title" style="color:var(--red)">Losses only</div>
+          <div class="export-option-count">{{ counts.lose }} runs</div>
+        </div>
+      </label>
+
+      <label class="export-option">
+        <input type="radio" name="filter" value="push"
+               {% if filter_mode == 'push' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title" style="color:var(--amber)">Pushes only (1x)</div>
+          <div class="export-option-count">{{ counts.push }} runs</div>
+        </div>
+      </label>
+
+      <label class="export-option">
+        <input type="radio" name="filter" value="win_lose"
+               {% if filter_mode == 'win_lose' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title">Wins + Losses</div>
+          <div class="export-option-count">{{ counts.win_lose }} runs</div>
+        </div>
+      </label>
+
+      <label class="export-option">
+        <input type="radio" name="filter" value="win_push"
+               {% if filter_mode == 'win_push' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title">Wins + Pushes</div>
+          <div class="export-option-count">{{ counts.win_push }} runs</div>
+        </div>
+      </label>
+
+      <label class="export-option">
+        <input type="radio" name="filter" value="lose_push"
+               {% if filter_mode == 'lose_push' %}checked{% endif %}>
+        <div class="export-option-body">
+          <div class="export-option-title">Losses + Pushes</div>
+          <div class="export-option-count">{{ counts.lose_push }} runs</div>
+        </div>
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Choose format</h2>
+    <p class="muted" style="font-size:13px;margin-bottom:16px">
+      The file will download directly. PDF is generated on the server
+      (no browser print dialog).
+    </p>
+
+    <div class="export-actions">
+      <button type="button" class="export-action" onclick="doExport('html')">
+        <div class="export-action-icon">📄</div>
+        <div class="export-action-title">Download HTML</div>
+        <div class="export-action-sub">Styled page, opens in any browser</div>
+      </button>
+
+      <button type="button" class="export-action" onclick="doExport('pdf')">
+        <div class="export-action-icon">📕</div>
+        <div class="export-action-title">Download PDF</div>
+        <div class="export-action-sub">Server-generated, print-ready</div>
+      </button>
+    </div>
+  </div>
+</form>
+
+<script>
+function doExport(fmt) {
+  var form = document.getElementById('export-form');
+  var radios = form.querySelectorAll('input[name="filter"]');
+  var filter = 'all';
+  for (var i = 0; i < radios.length; i++) {
+    if (radios[i].checked) { filter = radios[i].value; break; }
+  }
+  var path = window.location.pathname;
+  var base = path.replace(/\/export\/?$/, '');
+  var url = base + '/export/' + fmt + '?filter=' + encodeURIComponent(filter);
+  window.location.href = url;
+}
+</script>
+
+<style>
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.export-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: all 130ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  margin: 0;
+}
+
+.export-option:hover {
+  border-color: var(--border-3);
+  background: var(--surface);
+  transform: translateY(-1px);
+}
+
+.export-option input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.export-option input[type="radio"]:checked ~ .export-option-body .export-option-title {
+  font-weight: 700;
+}
+
+.export-option input[type="radio"]:checked ~ .export-option-body .export-option-count {
+  color: var(--text-2);
+}
+
+.export-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.export-option-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.export-option-count {
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-family: var(--mono);
+}
+
+.export-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.export-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 22px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: all 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  text-align: left;
+  font-family: inherit;
+  color: var(--text);
+  width: 100%;
+}
+
+.export-action:hover {
+  border-color: var(--accent);
+  background: var(--surface);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.export-action:active {
+  transform: translateY(0);
+}
+
+.export-action-icon {
+  font-size: 34px;
+  margin-bottom: 10px;
+  line-height: 1;
+}
+
+.export-action-title {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.015em;
+}
+
+.export-action-sub {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+</style>
 """
