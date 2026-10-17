@@ -50,6 +50,21 @@ MIN_BET = 1_000
 LOSS_MULTIPLIERS = (0.0, 0.5)
 PUSH_MULTIPLIERS = (1.0,)
 
+# ---- Panel detection patterns ----
+# Casino panel buttons usually contain these
+CASINO_BUTTON_PATTERNS = (
+    r"wheel", r"ᴄᴀꜱɪɴᴏ", r"casino", r"ꜱᴛᴀʀᴛ", r"ꜱᴘɪɴ",
+    r"spin", r"start", r"gambling", r"ɢᴀᴍʙʟɪɴɢ",
+    "🎰",
+)
+
+# Meowie panel buttons usually contain these
+MEOW_BUTTON_PATTERNS = (
+    r"feed", r"ꜰᴇᴇᴅ", r"play", r"ᴘʟᴀʏ", r"pet", r"ᴘᴇᴛ",
+    r"ꜱᴛʀᴇᴇᴛ", r"street", r"ɪɴᴠᴇɴᴛᴏʀʏ", r"inventory",
+    r"ᴍᴇᴏᴡ", r"meow", r"ᴄᴀᴛꜱ", r"cats", r"adopt",
+)
+
 
 # ===========================================================================
 # Helpers
@@ -137,6 +152,53 @@ def _msg_has_clickable(msg) -> bool:
         for b in row.buttons:
             if type(b).__name__ in _INLINE_TYPES:
                 return True
+    return False
+
+
+def _collect_button_texts(msg) -> list:
+    """Get list of lowercased button texts from a message."""
+    texts = []
+    try:
+        if not msg or not msg.reply_markup:
+            return texts
+        if not hasattr(msg.reply_markup, "rows"):
+            return texts
+        for row in msg.reply_markup.rows:
+            for b in row.buttons:
+                texts.append((getattr(b, "text", "") or "").strip().lower())
+    except Exception:
+        pass
+    return texts
+
+
+def _is_casino_panel(msg) -> bool:
+    """Return True only if msg looks like the Casino/Wheel panel."""
+    if not _msg_has_clickable(msg):
+        return False
+    texts = _collect_button_texts(msg)
+    if not texts:
+        return False
+    joined = " | ".join(texts)
+
+    # Reject if any meow-button pattern present
+    for pat in MEOW_BUTTON_PATTERNS:
+        if re.search(pat, joined, re.IGNORECASE):
+            log_bot.info(
+                f"casino: [panel] skip msg={getattr(msg, 'id', '?')} "
+                f"(meow panel; buttons={texts[:4]})"
+            )
+            return False
+
+    # Accept only if a casino-button pattern is present
+    for pat in CASINO_BUTTON_PATTERNS:
+        if re.search(pat, joined, re.IGNORECASE):
+            return True
+
+    # Ambiguous: accept only if the panel has >= 4 buttons
+    # (Casino panel is usually 2x2; Meowie panel has fewer or different)
+    if len(texts) >= 4:
+        return True
+
     return False
 
 
@@ -426,7 +488,7 @@ def _parse_multipliers(cfg: dict) -> list:
 
 
 # ===========================================================================
-# Profile parser — ROBUST VERSION
+# Profile parser (robust)
 # ===========================================================================
 _PROFILE_RE = re.compile(
     r"ᴍᴇᴏᴡ\s*ᴘᴏɪɴᴛꜱ\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*([ᴍᴋɢʙmkbg])",
@@ -444,19 +506,13 @@ _CATS_RE = re.compile(r"ꜱᴛʀᴇᴇᴛ\s*ᴄᴀᴛꜱ\s*[:：]\s*(\d+)", re.I
 
 
 def parse_profile(text: str) -> Optional[dict]:
-    """Parse Meowie profile using robust substring search.
-
-    Works with various formats of the Meowie profile reply, which uses
-    unicode small-caps characters and may have encoding variations.
-    """
+    """Parse Meowie profile using robust substring search."""
     if not text:
         return None
 
     out = {}
 
-    # ---------------------------------------------------------------
-    # Meow Points
-    # ---------------------------------------------------------------
+    # ---- Meow Points ----
     for marker in ("ᴍᴇᴏᴡ ᴘᴏɪɴᴛꜱ", "ᴍᴇᴏᴡ ᴘᴏɪɴᴛs",
                    "MEOW POINTS", "Meow Points",
                    "meow points", "Meow_Points", "meow_points"):
@@ -473,9 +529,7 @@ def parse_profile(text: str) -> Optional[dict]:
                     out["meow_points"] = int(val)
             break
 
-    # ---------------------------------------------------------------
-    # Level
-    # ---------------------------------------------------------------
+    # ---- Level ----
     for marker in ("ʟᴇᴠᴇʟ", "LEVEL", "Level", "level"):
         idx = text.find(marker)
         if idx >= 0:
@@ -488,25 +542,18 @@ def parse_profile(text: str) -> Optional[dict]:
                     pass
             break
 
-    # ---------------------------------------------------------------
-    # EXP — try multiple patterns
-    # ---------------------------------------------------------------
+    # ---- EXP ----
     exp_patterns = (
-        # X<suffix> / Y<suffix> (any separator)
         r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)\s*[/\-|❱›→]\s*"
         r"([0-9]+(?:[.,][0-9]+)?)\s*([ᴋᴍkm]?)",
-        # X<suffix> / Y<suffix> (no space around /)
         r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)\s*/\s*"
         r"([0-9]+(?:[.,][0-9]+)?[ᴋᴍkm]?)",
     )
-
     for pat in exp_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if not m:
             continue
-
         groups = m.groups()
-
         if len(groups) == 4:
             try:
                 cur_val = float(groups[0].replace(",", "."))
@@ -520,7 +567,6 @@ def parse_profile(text: str) -> Optional[dict]:
                 out["exp_current"] = int(cur_val)
             except (ValueError, TypeError):
                 pass
-
             try:
                 need_val = float(groups[2].replace(",", "."))
                 suffix = (groups[3] or "").lower()
@@ -533,9 +579,7 @@ def parse_profile(text: str) -> Optional[dict]:
                 out["exp_needed"] = int(need_val)
             except (ValueError, TypeError):
                 pass
-
             break
-
         elif len(groups) == 2:
             cur = _parse_human_number(groups[0])
             need = _parse_human_number(groups[1])
@@ -545,9 +589,7 @@ def parse_profile(text: str) -> Optional[dict]:
                 out["exp_needed"] = int(need)
             break
 
-    # ---------------------------------------------------------------
-    # Street Cats
-    # ---------------------------------------------------------------
+    # ---- Street Cats ----
     for marker in ("ꜱᴛʀᴇᴇᴛ ᴄᴀᴛꜱ", "ꜱᴛʀᴇᴇᴛ ᴄᴀᴛs",
                    "STREET CATS", "Street Cats", "street cats"):
         idx = text.find(marker)
@@ -746,7 +788,9 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
     try:
         log_bot.info(f"casino: [meow] sending '{MEOW_CALL_TEXT}' uid={user_id}")
         await client.send_message(int(chat_id), MEOW_CALL_TEXT)
-        save_config(user_id, last_meow=_now_iso())
+        # Reset panel_msg_id — the meow reply creates a new (Meowie) panel
+        # that must NOT be mistaken for the Casino panel
+        save_config(user_id, last_meow=_now_iso(), panel_msg_id=0)
         try:
             verify = get_config(user_id).get("last_meow", "")
             log_bot.info(f"casino: [meow] verified last_meow={verify}")
@@ -844,7 +888,6 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     if bet != int(cfg["current_bet"]):
         save_config(user_id, current_bet=bet)
 
-    # peak_bet فوراً آپدیت شود
     if bet > int(cfg.get("peak_bet", 0) or 0):
         save_config(user_id, peak_bet=bet)
         log_bot.info(f"casino: [peak] updated peak_bet={bet} (before play)")
@@ -854,8 +897,8 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
         st.bet_amount = bet
         st.run_id = _rand_id()
         st.panel_msg_id = None
-        if cfg.get("panel_msg_id"):
-            st.last_panel_id = int(cfg["panel_msg_id"])
+        # Do NOT reuse stale panel from previous cycle — it might be a Meowie panel
+        st.last_panel_id = None
 
     db.add_casino_run({
         "id": st.run_id, "user_id": user_id, "chat_id": chat_id,
@@ -896,25 +939,30 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         base_id = int(getattr(sent_msg, "id", 0) or 0)
         await asyncio.sleep(3.0)
 
+        # Only accept panels that look like the Casino/Wheel panel.
+        # The Meowie panel (from "میوهام") is explicitly rejected.
         panel_msg = None
         for attempt in range(1, 11):
             msgs = await client.get_messages(chat_id, limit=30)
             for m in msgs:
-                if m.id > base_id and not m.out and _msg_has_clickable(m):
-                    panel_msg = m
-                    break
+                if m.id > base_id and not m.out:
+                    if _is_casino_panel(m):
+                        panel_msg = m
+                        break
             if panel_msg is not None:
                 break
             await asyncio.sleep(2.0)
 
-        if panel_msg is None and st.last_panel_id:
-            cached = await _get_message(client, chat_id, st.last_panel_id)
-            if _msg_has_clickable(cached):
-                log_bot.warning("casino: [2] no new panel, using cached one")
-                panel_msg = cached
+        if panel_msg is None:
+            # Last-resort fallback: use last_panel_id IF it's a casino panel
+            if st.last_panel_id:
+                cached = await _get_message(client, chat_id, st.last_panel_id)
+                if _is_casino_panel(cached):
+                    log_bot.warning("casino: [2] using cached casino panel")
+                    panel_msg = cached
 
         if panel_msg is None:
-            raise TimeoutError("panel not found")
+            raise TimeoutError("casino panel not found")
 
         st.panel_msg_id = panel_msg.id
         st.last_panel_id = panel_msg.id
