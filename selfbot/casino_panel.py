@@ -229,7 +229,17 @@ CASINO_ADMIN_TEMPLATE = r"""
 
 <!-- ======================= Recent runs ======================= -->
 <div class="card">
-  <h2>Recent runs <span class="sub">{{ runs|length }}</span></h2>
+  <h2>
+    Recent runs <span class="sub">{{ runs|length }}</span>
+  </h2>
+  <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:flex-end">
+    <form method="post" action="{{ url_for('casino_clear_runs') }}"
+          onsubmit="return confirm('Delete all recent runs? This cannot be undone.');"
+          style="display:inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="btn btn-sm btn-danger">Clear all runs</button>
+    </form>
+  </div>
   <div class="table-wrap">
     <table>
       <thead>
@@ -247,6 +257,7 @@ CASINO_ADMIN_TEMPLATE = r"""
           {% if r.result == 'win' %}<span class="badge green">win</span>
           {% elif r.result == 'lose' %}<span class="badge red">lose</span>
           {% elif r.result == 'push' %}<span class="badge amber">push</span>
+          {% elif r.status == 'timeout' %}<span class="badge amber">timeout</span>
           {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
         </td>
         <td class="mono">{{ r.multiplier }}x</td>
@@ -468,7 +479,17 @@ CASINO_USER_TEMPLATE = r"""
 
 <!-- ======================= Recent runs ======================= -->
 <div class="card">
-  <h2>Recent runs <span class="sub">{{ runs|length }}</span></h2>
+  <h2>
+    Recent runs <span class="sub">{{ runs|length }}</span>
+  </h2>
+  <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:flex-end">
+    <form method="post" action="{{ url_for('user.casino_clear_runs') }}"
+          onsubmit="return confirm('Delete all recent runs? This cannot be undone.');"
+          style="display:inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="btn btn-sm btn-danger">Clear all runs</button>
+    </form>
+  </div>
   <div class="table-wrap">
     <table>
       <thead>
@@ -486,6 +507,7 @@ CASINO_USER_TEMPLATE = r"""
           {% if r.result == 'win' %}<span class="badge green">win</span>
           {% elif r.result == 'lose' %}<span class="badge red">lose</span>
           {% elif r.result == 'push' %}<span class="badge amber">push</span>
+          {% elif r.status == 'timeout' %}<span class="badge amber">timeout</span>
           {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
         </td>
         <td class="mono">{{ r.multiplier }}x</td>

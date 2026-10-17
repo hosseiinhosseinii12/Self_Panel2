@@ -1023,6 +1023,18 @@ def list_casino_runs(user_id: int = None, limit: int = 100) -> List[dict]:
     return [dict(r) for r in rows]
 
 
+def clear_casino_runs(user_id: int = None) -> int:
+    """Delete all casino runs (for one user or all). Returns count."""
+    _ensure_ready()
+    conn = get_conn()
+    if user_id is not None:
+        cur = conn.execute("DELETE FROM casino_runs WHERE user_id = ?",
+                          (int(user_id),))
+    else:
+        cur = conn.execute("DELETE FROM casino_runs")
+    return cur.rowcount or 0
+
+
 def casino_stats(user_id: int) -> dict:
     _ensure_ready()
     conn = get_conn()
