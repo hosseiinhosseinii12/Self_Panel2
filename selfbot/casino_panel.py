@@ -121,16 +121,21 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Interval (seconds, ≥ 60)</label>
+          <label>Bet interval (seconds, ≥ 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60">
         </div>
         <div>
-          <label>Winning multipliers</label>
-          <input type="text" name="multipliers"
-                 value="{{ cfg.multipliers }}">
+          <label>Meow interval (seconds, ≥ 60)</label>
+          <input type="number" name="meow_interval"
+                 value="{{ cfg.meow_interval }}" min="60">
         </div>
       </div>
+
+      <label class="mt-3">Winning multipliers (comma-separated)</label>
+      <input type="text" name="multipliers"
+             value="{{ cfg.multipliers }}"
+             placeholder="1.5,2,2.5,3">
 
       <label>Strategy mode</label>
       <select name="strategy_mode">
@@ -147,7 +152,9 @@ CASINO_ADMIN_TEMPLATE = r"""
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
         0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
-        Bets above 5,000,000 are rounded DOWN to 5,000,000.
+        Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
+        <strong>میوهام</strong> is sent every <code>meow_interval</code> seconds,
+        15s before <strong>Casino</strong>.
       </div>
 
       <div class="mt-4">
@@ -258,6 +265,7 @@ CASINO_ADMIN_TEMPLATE = r"""
           {% elif r.result == 'lose' %}<span class="badge red">lose</span>
           {% elif r.result == 'push' %}<span class="badge amber">push</span>
           {% elif r.status == 'timeout' %}<span class="badge amber">timeout</span>
+          {% elif r.status == 'error' %}<span class="badge red">error</span>
           {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
         </td>
         <td class="mono">{{ r.multiplier }}x</td>
@@ -417,17 +425,33 @@ CASINO_USER_TEMPLATE = r"""
                  {% if not can_edit_bet %}disabled{% endif %}>
         </div>
         <div>
-          <label>Interval (seconds, ≥ 60)</label>
+          <label>Bet interval (seconds, ≥ 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60"
                  {% if not can_edit_interval %}disabled{% endif %}>
         </div>
       </div>
 
+      <div class="field-row mt-3">
+        <div>
+          <label>Meow interval (seconds, ≥ 60)</label>
+          <input type="number" name="meow_interval"
+                 value="{{ cfg.meow_interval }}" min="60">
+        </div>
+        <div>
+          <label>Winning multipliers (comma-separated)</label>
+          <input type="text" name="multipliers"
+                 value="{{ cfg.multipliers }}"
+                 placeholder="1.5,2,2.5,3">
+        </div>
+      </div>
+
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
         0x / 0.5x → ×3 · 1x → repeat · win (≥1.5x) → reset to initial.<br>
-        Bets above 5,000,000 are rounded DOWN to 5,000,000.
+        Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
+        <strong>میوهام</strong> is sent every <code>meow_interval</code> seconds,
+        15s before <strong>Casino</strong>.
       </div>
 
       <div class="mt-4">
@@ -508,6 +532,7 @@ CASINO_USER_TEMPLATE = r"""
           {% elif r.result == 'lose' %}<span class="badge red">lose</span>
           {% elif r.result == 'push' %}<span class="badge amber">push</span>
           {% elif r.status == 'timeout' %}<span class="badge amber">timeout</span>
+          {% elif r.status == 'error' %}<span class="badge red">error</span>
           {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
         </td>
         <td class="mono">{{ r.multiplier }}x</td>

@@ -67,12 +67,19 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             max_bet = CAS.MAX_BET
         max_bet = min(max_bet, CAS.MAX_BET)
 
-        # ---- interval ----
+        # ---- bet interval ----
         try:
             interval = int(request.form.get("bet_interval", "301"))
             interval = max(60, interval)
         except ValueError:
             interval = CAS.DEFAULT_INTERVAL
+
+        # ---- meow interval ----
+        try:
+            meow_interval = int(request.form.get("meow_interval", "600"))
+            meow_interval = max(60, meow_interval)
+        except ValueError:
+            meow_interval = 600
 
         mults = (request.form.get("multipliers") or "1.5,2,2.5,3").strip()
         strategy = request.form.get("strategy_mode", "martingale")
@@ -86,6 +93,7 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
             max_bet=max_bet,
             max_allowed_bet=max_bet,
             bet_interval=interval,
+            meow_interval=meow_interval,
             multipliers=mults,
             strategy_mode=strategy,
         )
@@ -107,7 +115,10 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
                      ip=request.remote_addr,
                      admin_name=current_admin_name(),
                      meta={"chat_id": chat_id, "initial": initial,
-                           "interval": interval, "max_bet": max_bet})
+                           "interval": interval,
+                           "meow_interval": meow_interval,
+                           "max_bet": max_bet,
+                           "multipliers": mults})
         flash("Casino configuration saved.")
         return redirect(url_for("casino_page"))
 
@@ -275,7 +286,7 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
             fields["current_bet"] = initial
             fields["peak_bet"] = initial
 
-        # ---- interval ----
+        # ---- bet interval ----
         try:
             interval = int(request.form.get(
                 "bet_interval", str(cfg["bet_interval"])))
@@ -284,6 +295,21 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
             interval = cfg["bet_interval"]
         if interval != cfg["bet_interval"]:
             fields["bet_interval"] = interval
+
+        # ---- meow interval ----
+        try:
+            meow_interval = int(request.form.get(
+                "meow_interval", str(cfg.get("meow_interval", 600))))
+            meow_interval = max(60, meow_interval)
+        except ValueError:
+            meow_interval = cfg.get("meow_interval", 600)
+        if meow_interval != cfg.get("meow_interval", 600):
+            fields["meow_interval"] = meow_interval
+
+        # ---- multipliers ----
+        mults = (request.form.get("multipliers") or "").strip()
+        if mults and mults != cfg.get("multipliers", ""):
+            fields["multipliers"] = mults
 
         if fields:
             CAS.save_config(uid, **fields)
