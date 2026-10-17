@@ -10,7 +10,7 @@ Strategy (Martingale v2 — فقط روی 0x و 0.5x):
 
 ترتیب ارسال:
   - اگر زمان «میوهام» رسیده باشد (یا last_meow خالی/قدیمی باشد):
-    «میوهام» → ۱۰ ثانیه صبر → «Casino»
+    «میوهام» → 15 ثانیه صبر → «Casino»
   - در غیر این صورت مستقیماً «Casino»
 
 Profile (از پاسخ پنل Meowie پارس می‌شود):
@@ -52,7 +52,7 @@ MEOW_CALL_TEXT = "میوهام"
 DEFAULT_INTERVAL = 301
 MEOW_INTERVAL = 600              # هر 10 دقیقه یک بار «میوهام»
 MEOW_FORCE_AFTER = 3600          # اگر > 1 ساعت گذشته، حتماً بفرست
-MEOW_TO_CASINO_DELAY = 10.0      # صبر بعد از «میوهام» قبل از «Casino»
+MEOW_TO_CASINO_DELAY = 15.0      # صبر بعد از «میوهام» قبل از «Casino»
 GAME_TIMEOUT = 120.0
 POLL_INTERVAL = 1.5
 
@@ -649,7 +649,13 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
     False یعنی ارسال نشد (زمانش نرسیده، client نیست، یا خطا داشت).
     """
     chat_id = cfg.get("chat_id")
+    log_bot.info(
+        f"casino: [meow] check uid={user_id} force={force} "
+        f"chat_id={chat_id} last_meow={cfg.get('last_meow') or 'empty'}"
+    )
+
     if not chat_id:
+        log_bot.warning(f"casino: [meow] no chat_id uid={user_id}")
         return False
 
     if not force:
@@ -658,23 +664,33 @@ async def _maybe_send_meow(runtime, user_id: int, cfg: dict,
         if last:
             try:
                 last_dt = datetime.fromisoformat(last)
-                if (now - last_dt).total_seconds() < MEOW_INTERVAL:
+                elapsed = (now - last_dt).total_seconds()
+                if elapsed < MEOW_INTERVAL:
+                    log_bot.info(
+                        f"casino: [meow] skip — last sent {elapsed:.0f}s ago "
+                        f"(< {MEOW_INTERVAL}s) uid={user_id}"
+                    )
                     return False
             except ValueError:
                 pass
 
     client = runtime.user_clients.get(int(user_id))
     if client is None:
-        log_bot.warning(f"casino: meow skipped — no client uid={user_id}")
+        log_bot.warning(f"casino: [meow] no client uid={user_id}")
         return False
 
     try:
+        log_bot.info(f"casino: [meow] sending '{MEOW_CALL_TEXT}' uid={user_id}")
         await client.send_message(int(chat_id), MEOW_CALL_TEXT)
         save_config(user_id, last_meow=_now_iso())
-        log_bot.info(f"casino: sent 'میوهام' uid={user_id} (force={force})")
+        log_bot.info(
+            f"casino: [meow] SENT 'میوهام' uid={user_id} (force={force})"
+        )
         return True
     except Exception as e:
-        log_bot.warning(f"casino: meow send failed: {e}")
+        log_bot.warning(
+            f"casino: [meow] send failed: {type(e).__name__}: {e}"
+        )
         return False
 
 
@@ -697,6 +713,9 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
     client = runtime.user_clients.get(int(user_id))
     if client is None:
         db.add_casino_log(user_id, chat_id, "error", "user client not connected")
+        log_bot.warning(
+            f"casino: [cycle] no client uid={user_id}, aborting cycle"
+        )
         return
 
     try:
@@ -706,7 +725,7 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
 
     # -------------------------------------------------------------------
     # ۱) اگر زمان «میوهام» رسیده (یا last_meow خالی/قدیمی)، اول آن را
-    #    بزن، ۱۰ ثانیه صبر کن، بعد کازینو را شروع کن.
+    #    بزن، ۱۵ ثانیه صبر کن، بعد کازینو را شروع کن.
     # -------------------------------------------------------------------
     last_meow = cfg.get("last_meow") or ""
     force_meow = False
@@ -739,7 +758,7 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
             )
         except asyncio.TimeoutError:
             pass
-        # cfg ممکن است در این ۱۰ ثانیه عوض شده باشد
+        # cfg ممکن است در این ۱۵ ثانیه عوض شده باشد
         cfg = get_config(user_id)
         chat_id = cfg["chat_id"]
 
@@ -915,6 +934,8 @@ async def _poll_result(client, chat_id: int, panel_id: int,
         seen.add((pre.id, pre.message or ""))
 
     last_seen_texts = []
+    parse_attempts = 0
+
     deadline = time.time() + GAME_TIMEOUT
     while time.time() < deadline:
         await asyncio.sleep(POLL_INTERVAL)
@@ -938,21 +959,29 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             if key in seen:
                 continue
             seen.add(key)
-            last_seen_texts.append(text[:80])
-            if len(last_seen_texts) > 5:
+            last_seen_texts.append(text[:100])
+            if len(last_seen_texts) > 10:
                 last_seen_texts.pop(0)
 
             parsed = _parse_result(text)
+            parse_attempts += 1
+            if parse_attempts <= 30:
+                log_bot.info(
+                    f"casino: [poll] msg={m.id} out={m.out} "
+                    f"parsed={'OK' if parsed else 'None'} "
+                    f"text={text[:120]!r}"
+                )
+
             if parsed is not None:
                 log_bot.info(
-                    f"casino: result parsed {parsed} (msg {m.id}) "
-                    f"raw={text[:120]!r}"
+                    f"casino: [poll] RESULT {parsed} (msg {m.id}) "
+                    f"raw={text[:150]!r}"
                 )
                 return parsed
 
     log_bot.warning(
-        f"casino: no result within {GAME_TIMEOUT:.0f}s. "
-        f"Recent texts: {last_seen_texts}"
+        f"casino: [poll] no result within {GAME_TIMEOUT:.0f}s. "
+        f"seen {len(seen)} messages. Last texts: {last_seen_texts}"
     )
     return None
 
@@ -974,7 +1003,10 @@ def _parse_result(text: str) -> Optional[dict]:
     replacements = {
         "ꜱ": "s", "ᴄ": "c", "ᴏ": "o", "ʀ": "r", "ᴇ": "e",
         "ᴋ": "k", "ᴍ": "m", "ᴘ": "p", "ɪ": "i", "ɴ": "n",
-        "×": "x", "✕": "x", "✖": "x",
+        "×": "x", "✕": "x", "✖": "x", "ᴡ": "w", "ᴛ": "t",
+        "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ꜰ": "f",
+        "ɢ": "g", "ʜ": "h", "ᴊ": "j", "ʟ": "l", "ᴠ": "v",
+        "ᴢ": "z", "ʏ": "y", "ᴜ": "u",
     }
     for a, b in replacements.items():
         t = t.replace(a, b)
@@ -988,6 +1020,7 @@ def _parse_result(text: str) -> Optional[dict]:
         r"🎰[^\d]{0,20}(\d+)",
         r"\|\s*(\d+)\s*\|",
         r"(\d+)\s*\|",
+        r"(\d+)\s*/\s*64",
     ):
         m = re.search(pat, low)
         if m:
@@ -1035,7 +1068,6 @@ async def _finalize_run(user_id: int, chat_id: int, bet: int,
     mults = _parse_multipliers(cfg)
     mult = parsed.get("multiplier")
     if mult is None:
-        # regex مولتیپلایر را پیدا نکرد — از روی score نتیجه بگیر
         if result == "win":
             mult = random.choice(mults)
         else:
