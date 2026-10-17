@@ -18,30 +18,52 @@ from . import db
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 
-def _to_tehran(iso_str: str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Convert an ISO8601 UTC string to Tehran local time for display."""
-    if not iso_str:
-        return "—"
-    s = str(iso_str).strip()
-    if not s:
-        return "—"
+def _to_tehran(iso_str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """Convert an ISO8601 UTC string to Tehran local time for display.
+    Never raises; always returns a string. Empty/invalid -> '—'.
+    """
     try:
+        if not iso_str:
+            return "—"
+        s = str(iso_str).strip()
+        if not s:
+            return "—"
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
-        dt = datetime.fromisoformat(s)
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            # Fallback: take first 19 chars (already a time-ish string)
+            return str(iso_str)[:19] or "—"
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(TEHRAN_TZ).strftime(fmt)
     except Exception:
-        return str(iso_str)[:19] or "—"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(TEHRAN_TZ).strftime(fmt)
+        return "—"
 
 
-def _install_jinja_filters(target):
-    """Install the `tehran` filter on a Flask app or blueprint."""
-    try:
-        target.jinja_env.filters["tehran"] = _to_tehran
-    except Exception as e:
-        log_flask.warning(f"could not install tehran filter: {e}")
+def _enrich_cfg_times(cfg: dict) -> dict:
+    """Add _tehran variants for all time fields in a cfg dict (in-place)."""
+    cfg["last_run_tehran"] = _to_tehran(cfg.get("last_run", ""))
+    cfg["next_run_tehran"] = _to_tehran(cfg.get("next_run", ""))
+    cfg["last_meow_tehran"] = _to_tehran(cfg.get("last_meow", ""))
+    cfg["profile_updated_tehran"] = _to_tehran(cfg.get("profile_updated", ""))
+    return cfg
+
+
+def _enrich_runs(runs: list) -> list:
+    """Add _tehran variants for all time fields in a runs list (in-place)."""
+    for r in runs:
+        r["started_at_tehran"] = _to_tehran(r.get("started_at", ""))
+        r["finished_at_tehran"] = _to_tehran(r.get("finished_at", ""))
+    return runs
+
+
+def _enrich_logs(logs: list) -> list:
+    """Add _tehran variants for all time fields in a logs list (in-place)."""
+    for l in logs:
+        l["created_at_tehran"] = _to_tehran(l.get("created_at", ""))
+    return logs
 
 
 # ===========================================================================
@@ -51,7 +73,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
                                  render_page, get_runtime_safe,
                                  current_admin_id, current_admin_name):
     """Register casino routes for the admin panel."""
-    _install_jinja_filters(app)
 
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
@@ -64,6 +85,12 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         stats = db.casino_stats(uid)
         runs = db.list_casino_runs(uid, limit=30)
         logs = db.list_casino_logs(uid, limit=30)
+
+        # Convert all times to Tehran for display
+        _enrich_cfg_times(cfg)
+        _enrich_runs(runs)
+        _enrich_logs(logs)
+
         body = render_template_string(
             CP.CASINO_ADMIN_TEMPLATE,
             cfg=cfg, stats=stats, runs=runs, logs=logs, csrf=csrf_token(),
@@ -249,7 +276,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
 def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
                                 render_layout, get_uid):
     """Register casino routes on the user blueprint."""
-    _install_jinja_filters(bp)
 
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
@@ -261,6 +287,10 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         cfg = CAS.get_config(uid)
         stats = db.casino_stats(uid)
         runs = db.list_casino_runs(uid, limit=30)
+
+        # Convert all times to Tehran for display
+        _enrich_cfg_times(cfg)
+        _enrich_runs(runs)
 
         is_admin = (uid == _owner_id())
         can_edit_chat = is_admin
