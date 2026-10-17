@@ -59,7 +59,7 @@ CASINO_ADMIN_TEMPLATE = r"""
   </div>
   {% else %}
   <div class="muted mt-2" style="font-size:12px">
-    No profile reply received yet. Send the Meowie profile once to seed it.
+    No profile reply received yet.
   </div>
   {% endif %}
 </div>
@@ -121,21 +121,17 @@ CASINO_ADMIN_TEMPLATE = r"""
 
       <div class="field-row mt-3">
         <div>
-          <label>Bet interval (seconds, ≥ 60)</label>
+          <label>Bet interval (seconds, &ge; 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60">
         </div>
         <div>
-          <label>Meow interval (seconds, ≥ 60)</label>
-          <input type="number" name="meow_interval"
-                 value="{{ cfg.meow_interval }}" min="60">
+          <label>Winning multipliers (comma-separated)</label>
+          <input type="text" name="multipliers"
+                 value="{{ cfg.multipliers }}"
+                 placeholder="1.5,2,2.5,3">
         </div>
       </div>
-
-      <label class="mt-3">Winning multipliers (comma-separated)</label>
-      <input type="text" name="multipliers"
-             value="{{ cfg.multipliers }}"
-             placeholder="1.5,2,2.5,3">
 
       <label>Strategy mode</label>
       <select name="strategy_mode">
@@ -152,9 +148,7 @@ CASINO_ADMIN_TEMPLATE = r"""
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
         0x / 0.5x &rarr; x3 &middot; 1x &rarr; repeat &middot; win (&ge;1.5x) &rarr; reset to initial.<br>
-        Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
-        <strong>&#1605;&#1740;&#1608;&#1607;&#1575;&#1605;</strong> is sent every
-        <code>meow_interval</code> seconds, 15s before <strong>Casino</strong>.
+        Bets above 5,000,000 are rounded DOWN to 5,000,000.
       </div>
 
       <div class="mt-4">
@@ -225,8 +219,6 @@ CASINO_ADMIN_TEMPLATE = r"""
                 <td class="mono text-right">{{ cfg.last_run_tehran }}</td></tr>
             <tr><td class="muted">Next run (Tehran)</td>
                 <td class="mono text-right">{{ cfg.next_run_tehran }}</td></tr>
-            <tr><td class="muted">Last "میوهام" (Tehran)</td>
-                <td class="mono text-right">{{ cfg.last_meow_tehran }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -429,7 +421,7 @@ CASINO_USER_TEMPLATE = r"""
                  {% if not can_edit_bet %}disabled{% endif %}>
         </div>
         <div>
-          <label>Bet interval (seconds, ≥ 60)</label>
+          <label>Bet interval (seconds, &ge; 60)</label>
           <input type="number" name="bet_interval"
                  value="{{ cfg.bet_interval }}" min="60"
                  {% if not can_edit_interval %}disabled{% endif %}>
@@ -437,11 +429,6 @@ CASINO_USER_TEMPLATE = r"""
       </div>
 
       <div class="field-row mt-3">
-        <div>
-          <label>Meow interval (seconds, ≥ 60)</label>
-          <input type="number" name="meow_interval"
-                 value="{{ cfg.meow_interval }}" min="60">
-        </div>
         <div>
           <label>Winning multipliers (comma-separated)</label>
           <input type="text" name="multipliers"
@@ -453,9 +440,7 @@ CASINO_USER_TEMPLATE = r"""
       <div class="muted mt-3" style="font-size:12px;line-height:1.6">
         <strong>Strategy:</strong>
         0x / 0.5x &rarr; x3 &middot; 1x &rarr; repeat &middot; win (&ge;1.5x) &rarr; reset to initial.<br>
-        Bets above 5,000,000 are rounded DOWN to 5,000,000.<br>
-        <strong>&#1605;&#1740;&#1608;&#1607;&#1575;&#1605;</strong> is sent every
-        <code>meow_interval</code> seconds, 15s before <strong>Casino</strong>.
+        Bets above 5,000,000 are rounded DOWN to 5,000,000.
       </div>
 
       <div class="mt-4">
@@ -721,10 +706,6 @@ function doExport(fmt) {
   font-weight: 700;
 }
 
-.export-option input[type="radio"]:checked ~ .export-option-body .export-option-count {
-  color: var(--text-2);
-}
-
 .export-option-body {
   display: flex;
   flex-direction: column;
@@ -771,10 +752,6 @@ function doExport(fmt) {
   background: var(--surface);
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
-}
-
-.export-action:active {
-  transform: translateY(0);
 }
 
 .export-action-icon {
