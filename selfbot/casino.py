@@ -1,18 +1,6 @@
-"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune.
-
-Strategy (Martingale v2 — فقط روی 0x و 0.5x):
-  - Initial bet قابل ویرایش (پیش‌فرض 100,000)
-  - نتیجه 0x یا 0.5x  → bet = bet * 3
-  - نتیجه 1x          → bet = bet (تکرار)
-  - نتیجه برد (>=1.5) → bet = initial_bet
-  - سقف سخت: 5,000,000
-
-Access control:
-  - Owner همیشه آزاد است.
-  - کاربران دیگر پیش‌فرض قفل هستند. تا زمانی که ادمین تایید نکند
-    (casino_unlocked = 1 در DB)، هیچ چرخه‌ای اجرا نمی‌شود.
-"""
+"""Self-bot casino automator — plays Meowie Casino's Wheel of Fortune."""
 import asyncio
+import os
 import random
 import re
 import secrets
@@ -81,7 +69,6 @@ def is_owner(user_id: int) -> bool:
 
 
 def is_locked(user_id: int) -> bool:
-    """Return True if the user is LOCKED out of casino."""
     if is_owner(user_id):
         return False
     return not db.is_casino_unlocked(int(user_id))
@@ -95,6 +82,62 @@ def lock(user_id: int) -> None:
     if is_owner(user_id):
         return
     db.set_casino_unlocked(int(user_id), False)
+
+
+# ===========================================================================
+# Target chat resolution
+# ===========================================================================
+def _owner_chat_id() -> Optional[int]:
+    """Return the target chat_id that all users should play in.
+
+    Lookup order (first hit wins):
+      1. CASINO_CHAT_ID env var
+      2. CONFIG['casino_chat_id'] (from config.json)
+      3. casino_config row for CONFIG['owner_id']
+      4. Any casino_config row that has a non-empty chat_id
+    """
+    # 1) env var
+    try:
+        env_val = os.environ.get("CASINO_CHAT_ID", "").strip()
+        if env_val:
+            return int(env_val)
+    except Exception:
+        pass
+
+    # 2) config.json
+    try:
+        cfg_val = CONFIG.get("casino_chat_id")
+        if cfg_val:
+            return int(cfg_val)
+    except Exception:
+        pass
+
+    # 3) owner's casino_config
+    try:
+        owner_id = int(CONFIG.get("owner_id", 338266658))
+        owner_cfg = db.get_casino_config(owner_id) or {}
+        cid = owner_cfg.get("chat_id")
+        if cid:
+            return int(cid)
+    except Exception:
+        pass
+
+    # 4) fallback: scan all casino_config rows for a non-empty chat_id
+    try:
+        conn = db.get_conn()
+        row = conn.execute(
+            "SELECT chat_id FROM casino_config "
+            "WHERE chat_id IS NOT NULL AND chat_id != 0 "
+            "ORDER BY (CASE WHEN user_id = ? THEN 0 ELSE 1 END), user_id "
+            "LIMIT 1",
+            (int(CONFIG.get("owner_id", 338266658)),),
+        ).fetchone()
+        if row and row["chat_id"]:
+            return int(row["chat_id"])
+    except Exception as e:
+        log_bot.warning(f"_owner_chat_id fallback scan failed: {e}")
+
+    return None
 
 
 # ===========================================================================
@@ -375,9 +418,14 @@ async def _send_dice(client, chat_id: int, reply_to: int,
 # ===========================================================================
 def get_config(user_id: int) -> dict:
     c = db.get_casino_config(user_id) or {}
+
+    chat_id = c.get("chat_id")
+    if not is_owner(user_id) and not chat_id:
+        chat_id = _owner_chat_id()
+
     return {
         "enabled": bool(c.get("enabled", 0)),
-        "chat_id": c.get("chat_id"),
+        "chat_id": chat_id,
         "initial_bet": int(c.get("initial_bet", START_BET)),
         "current_bet": int(c.get("current_bet", START_BET)),
         "max_bet": int(c.get("max_bet", MAX_BET)),
@@ -590,7 +638,8 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
 
     client = runtime.user_clients.get(int(user_id))
     if client is None:
-        db.add_casino_log(user_id, chat_id, "error", "user client not connected")
+        db.add_casino_log(user_id, chat_id or 0, "error",
+                          "user client not connected")
         log_bot.warning(
             f"casino: [cycle] no client uid={user_id}, aborting cycle"
         )
@@ -1091,7 +1140,12 @@ async def trigger_now(runtime, user_id: int) -> dict:
         return {"ok": False, "error": "casino access is locked"}
     cfg = get_config(user_id)
     if not cfg["chat_id"]:
-        return {"ok": False, "error": "no chat_id"}
+        if is_owner(user_id):
+            return {"ok": False, "error": "no target chat configured"}
+        return {
+            "ok": False,
+            "error": "admin hasn't set a target chat yet",
+        }
     client = runtime.user_clients.get(int(user_id))
     if client is None:
         return {"ok": False, "error": "user client not connected"}
