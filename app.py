@@ -57,15 +57,15 @@ def _get_runtime():
 
 # ===========================================================================
 # Step 1: build app + blueprint
+# NOTE: user_panel.build_user_app() already registers casino user routes
+#       on the blueprint internally (at the bottom of user_panel.py).
+#       We do NOT re-register them here — that would cause
+#       "View function mapping is overwriting an existing endpoint function".
 # ===========================================================================
 admin_app = build_admin_app()
 user_app_bp = build_user_app()
 
 
-# ===========================================================================
-# Step 2: register casino USER routes on the blueprint
-#         (MUST be done BEFORE register_blueprint)
-# ===========================================================================
 def _render_page_admin(title: str, body: str, page: str):
     """Renders using the admin BASE_TEMPLATE."""
     from flask import render_template_string
@@ -73,60 +73,8 @@ def _render_page_admin(title: str, body: str, page: str):
         ADMIN_BASE_TEMPLATE, title=title, body=body, page=page)
 
 
-def _render_layout_for_casino(title: str, body: str, active: str = "casino"):
-    """Renders user panel layout for the casino page."""
-    from selfbot.user_panel import _render_layout_for_casino as _r
-    return _r(title, body, active)
-
-
-def _user_login_required(fn):
-    from functools import wraps
-    from flask import redirect, url_for, session
-    @wraps(fn)
-    def wrapper(*a, **kw):
-        if not session.get("user_id"):
-            return redirect(url_for("user.login_page"))
-        return fn(*a, **kw)
-    return wrapper
-
-
-def _user_csrf_token():
-    from selfbot.user_panel import _csrf_token as _t
-    return _t()
-
-
-def _user_csrf_check():
-    from selfbot.user_panel import _csrf_check as _c
-    return _c()
-
-
-def _get_uid():
-    from flask import session
-    return session.get("user_id")
-
-
-def _register_casino_user_routes_on_bp():
-    try:
-        from selfbot.casino_routes import register_casino_user_routes
-        register_casino_user_routes(
-            user_app_bp,
-            login_required=_user_login_required,
-            csrf_check=_user_csrf_check,
-            csrf_token=_user_csrf_token,
-            render_layout=_render_layout_for_casino,
-            get_uid=_get_uid,
-        )
-        log_flask.info("casino user routes registered (pre-blueprint)")
-    except Exception as e:
-        log_flask.exception(f"could not register casino user routes: {e}")
-
-
-# Register user casino routes BEFORE blueprint registration
-_register_casino_user_routes_on_bp()
-
-
 # ===========================================================================
-# Step 3: assemble Flask app (attach API, register blueprint)
+# Step 2: assemble Flask app
 # ===========================================================================
 flask_app = admin_app
 attach_api_routes(flask_app)
@@ -134,7 +82,8 @@ flask_app.register_blueprint(user_app_bp)
 
 
 # ===========================================================================
-# Step 4: register casino ADMIN routes on the app
+# Step 3: register casino ADMIN routes on the app
+# (user routes already registered on the blueprint inside user_panel.py)
 # ===========================================================================
 def _register_casino_admin_routes():
     try:
