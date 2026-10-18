@@ -50,6 +50,9 @@ def tx():
         raise
 
 
+# ===========================================================================
+# SCHEMA — only CREATE TABLE + basic indexes (no column-dependent indexes)
+# ===========================================================================
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -75,13 +78,11 @@ CREATE TABLE IF NOT EXISTS users (
     job_target INTEGER,
     web_token TEXT DEFAULT '',
     session_string TEXT DEFAULT '',
-    data TEXT DEFAULT '{}',
-    casino_unlocked INTEGER DEFAULT 0
+    data TEXT DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_users_web_token ON users(web_token);
 CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code);
 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
-CREATE INDEX IF NOT EXISTS idx_users_casino_unlocked ON users(casino_unlocked);
 
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
@@ -310,9 +311,11 @@ def init_db() -> None:
     global _initialized
     with _init_lock:
         conn = get_conn()
+
+        # 1) Execute base schema (tables + basic indexes)
         conn.executescript(SCHEMA)
 
-        # ---- users: ensure newer columns exist ----
+        # 2) users: ensure newer columns exist (before any column-dependent index)
         cur = conn.execute("PRAGMA table_info(users)")
         cols = {row["name"] for row in cur.fetchall()}
         wanted = {
@@ -334,7 +337,7 @@ def init_db() -> None:
             if col not in cols:
                 _add_column_if_missing(conn, "users", col, decl)
 
-        # ---- casino_config: ensure newer columns exist ----
+        # 3) casino_config: ensure newer columns exist
         cur = conn.execute("PRAGMA table_info(casino_config)")
         ccols = {row["name"] for row in cur.fetchall()}
         cwanted = {
@@ -353,6 +356,20 @@ def init_db() -> None:
         for col, decl in cwanted.items():
             if col not in ccols:
                 _add_column_if_missing(conn, "casino_config", col, decl)
+
+        # 4) Column-dependent indexes (must run AFTER the ALTER TABLE above,
+        #    because CREATE TABLE IF NOT EXISTS does NOT add new columns to
+        #    an existing table.)
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_users_casino_unlocked "
+            "ON users(casino_unlocked)",
+            "CREATE INDEX IF NOT EXISTS idx_req_type "
+            "ON requests(type)",
+        ):
+            try:
+                conn.execute(idx_sql)
+            except Exception:
+                pass
 
         _initialized = True
 
