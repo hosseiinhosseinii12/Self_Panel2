@@ -179,11 +179,6 @@ async def _load_user_sessions(runtime) -> None:
                     _register_user_client_format_hooks(runtime, uid, client)
                 except Exception as e:
                     log_bot.warning(f"format hook install failed uid={uid}: {e}")
-                try:
-                    from .casino import install_casino_listener
-                    install_casino_listener(runtime, uid, client)
-                except Exception as e:
-                    log_bot.warning(f"casino listener install failed uid={uid}: {e}")
                 u = rows.get(str(uid)) or {}
                 if u.get("clock_on"):
                     try:
@@ -222,7 +217,7 @@ async def _boot_async(runtime) -> None:
         log.error(f"DB init failed: {e}")
         raise
 
-    # ---- 1b. DATA DIR INFO (for debugging persistence) ----
+    # ---- 1b. DATA DIR INFO ----
     try:
         from .config import data_dir_info
         info = data_dir_info()
@@ -312,15 +307,6 @@ async def _boot_async(runtime) -> None:
         await _load_user_sessions(runtime)
     except Exception as e:
         log.warning(f"session load failed: {e}")
-
-    # ---- 7b. reset last_meow so first cycle always sends میوهام ----
-    try:
-        from . import db as _db
-        owner = int(CONFIG.get("owner_id", 338266658))
-        _db.upsert_casino_config(owner, last_meow="")
-        log.info("casino: reset last_meow on boot (force first meow)")
-    except Exception as e:
-        log.warning(f"casino: reset last_meow failed: {e}")
 
     # ---- 8. handlers + watchdog ----
     log.info("registering bot handlers…")
