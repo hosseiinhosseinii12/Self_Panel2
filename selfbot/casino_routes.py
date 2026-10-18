@@ -2,6 +2,8 @@
 
 Casino access is locked by default for non-owner users.
 Users can request access; admin approves from /admin/casino/access.
+
+Non-owner users inherit chat_id from the owner's casino config.
 """
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -93,7 +95,6 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
 
-    # ---------------- Main casino page ----------------
     @app.route("/admin/casino")
     @login_required
     def casino_page():
@@ -127,16 +128,13 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         pending = RM.pending_casino_requests()
         _enrich_requests(pending)
 
-        # all decided requests (for history)
         decided = db.list_requests(status=None, req_type="casino_access",
                                     limit=100)
         decided = [r for r in decided if r.get("status") != "pending"]
         _enrich_requests(decided)
 
         unlocked_users = db.list_casino_unlocked_users()
-        # enrich with user info
         for u in unlocked_users:
-            uid = int(u.get("id", 0))
             u["username_display"] = (
                 f"@{u.get('username')}" if u.get("username") else "—"
             )
@@ -295,7 +293,7 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         cfg = CAS.get_config(uid)
         new_state = not cfg["enabled"]
         if new_state and not cfg["chat_id"]:
-            flash("Set a chat ID first.", "error")
+            flash("Set a target chat ID first.", "error")
             return redirect(url_for("casino_page"))
         CAS.set_enabled(uid, new_state)
 
@@ -449,14 +447,12 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
 
-    # ---------------- Casino page (locked or full) ----------------
     @bp.route("/casino")
     @login_required
     def casino_page():
         uid = get_uid()
         is_admin = (uid == _owner_id())
 
-        # ---- Access check ----
         if CAS.is_locked(uid):
             pending_req = db.find_pending_request(uid, "casino_access")
             body = render_template_string(
@@ -467,7 +463,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
             )
             return render_layout("Casino (Locked)", body, "casino")
 
-        # ---- Unlocked: show normal casino page ----
         cfg = CAS.get_config(uid)
         stats = db.casino_stats(uid)
         runs = db.list_casino_runs(uid, limit=30)
@@ -488,7 +483,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         )
         return render_layout("Casino", body, "casino")
 
-    # ---------------- Request access ----------------
     @bp.route("/casino/request_access", methods=["POST"])
     @login_required
     def casino_request_access():
@@ -515,7 +509,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         )
         return redirect(url_for("user.casino_page"))
 
-    # ---------------- Config / toggle / trigger ----------------
     @bp.route("/casino/save", methods=["POST"])
     @login_required
     def casino_save():
@@ -586,9 +579,19 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
 
         cfg = CAS.get_config(uid)
         new_state = not cfg["enabled"]
+
         if new_state and not cfg["chat_id"]:
-            flash("Set a chat ID first.", "error")
+            if uid == _owner_id():
+                flash("Set a target chat ID first (Admin → Casino).",
+                      "error")
+            else:
+                flash(
+                    "The admin hasn't set a target chat yet. "
+                    "Please contact the admin.",
+                    "error",
+                )
             return redirect(url_for("user.casino_page"))
+
         CAS.set_enabled(uid, new_state)
 
         if new_state:
@@ -614,6 +617,19 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
 
         if CAS.is_locked(uid):
             flash("Casino is locked. Request access first.", "error")
+            return redirect(url_for("user.casino_page"))
+
+        cfg = CAS.get_config(uid)
+        if not cfg["chat_id"]:
+            if uid == _owner_id():
+                flash("Set a target chat ID first (Admin → Casino).",
+                      "error")
+            else:
+                flash(
+                    "The admin hasn't set a target chat yet. "
+                    "Please contact the admin.",
+                    "error",
+                )
             return redirect(url_for("user.casino_page"))
 
         try:
