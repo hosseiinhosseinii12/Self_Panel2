@@ -1,6 +1,7 @@
 """Admin + user routes for the Casino automator.
 
-No meow/meowie-profile references. Times shown in Tehran.
+Casino access is locked by default for non-owner users.
+Users can request access; admin approves from /admin/casino/access.
 """
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -14,6 +15,7 @@ from . import casino as CAS
 from . import casino_panel as CP
 from . import casino_export as EXP
 from . import db
+from . import requests_mod as RM
 
 
 # ===========================================================================
@@ -23,9 +25,6 @@ TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 
 def _to_tehran(iso_str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Convert an ISO8601 UTC string to Tehran local time for display.
-    Never raises; always returns a string. Empty/invalid -> '—'.
-    """
     try:
         if not iso_str:
             return "—"
@@ -64,8 +63,14 @@ def _enrich_logs(logs: list) -> list:
     return logs
 
 
+def _enrich_requests(reqs: list) -> list:
+    for r in reqs:
+        r["created_at_tehran"] = _to_tehran(r.get("created_at", ""))
+        r["decided_at_tehran"] = _to_tehran(r.get("decided_at", ""))
+    return reqs
+
+
 def _compute_filter_counts(runs: list) -> dict:
-    """Count runs per filter mode for display on the export page."""
     return {
         "all": len(runs),
         "win": len(EXP.filter_runs(runs, "win")),
@@ -88,6 +93,7 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
 
+    # ---------------- Main casino page ----------------
     @app.route("/admin/casino")
     @login_required
     def casino_page():
@@ -101,12 +107,113 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         _enrich_runs(runs)
         _enrich_logs(logs)
 
+        unlocked_users = db.list_casino_unlocked_users()
+        pending_access = RM.pending_casino_requests()
+
         body = render_template_string(
             CP.CASINO_ADMIN_TEMPLATE,
             cfg=cfg, stats=stats, runs=runs, logs=logs, csrf=csrf_token(),
+            unlocked_users=unlocked_users,
+            unlocked_count=len(unlocked_users),
+            pending_access_count=len(pending_access),
         )
         return render_page("Casino", body, "casino")
 
+    # ---------------- Access management page ----------------
+    @app.route("/admin/casino/access")
+    @login_required
+    def casino_access_page():
+        owner = _owner_id()
+        pending = RM.pending_casino_requests()
+        _enrich_requests(pending)
+
+        # all decided requests (for history)
+        decided = db.list_requests(status=None, req_type="casino_access",
+                                    limit=100)
+        decided = [r for r in decided if r.get("status") != "pending"]
+        _enrich_requests(decided)
+
+        unlocked_users = db.list_casino_unlocked_users()
+        # enrich with user info
+        for u in unlocked_users:
+            uid = int(u.get("id", 0))
+            u["username_display"] = (
+                f"@{u.get('username')}" if u.get("username") else "—"
+            )
+            u["first_name"] = u.get("first_name", "") or "—"
+
+        body = render_template_string(
+            CP.CASINO_ACCESS_TEMPLATE,
+            pending=pending,
+            decided=decided[:50],
+            unlocked_users=unlocked_users,
+            unlocked_count=len(unlocked_users),
+            owner_id=owner,
+            csrf=csrf_token(),
+        )
+        return render_page("Casino Access", body, "casino")
+
+    @app.route("/admin/casino/access/<rid>/approve", methods=["POST"])
+    @login_required
+    def casino_access_approve(rid: str):
+        csrf_check()
+        r = RM.approve(rid, current_admin_id())
+        if r:
+            audit_record(current_admin_id(), "casino_access_approve",
+                         target=str(r.get("user_id")),
+                         ip=request.remote_addr,
+                         admin_name=current_admin_name(),
+                         meta={"req": rid})
+            flash(f"Casino access APPROVED for user {r.get('user_id')}.")
+        else:
+            flash("Request not found or already decided.", "error")
+        return redirect(url_for("casino_access_page"))
+
+    @app.route("/admin/casino/access/<rid>/reject", methods=["POST"])
+    @login_required
+    def casino_access_reject(rid: str):
+        csrf_check()
+        r = RM.reject(rid, current_admin_id())
+        if r:
+            audit_record(current_admin_id(), "casino_access_reject",
+                         target=str(r.get("user_id")),
+                         ip=request.remote_addr,
+                         admin_name=current_admin_name(),
+                         meta={"req": rid})
+            flash(f"Casino access REJECTED for user {r.get('user_id')}.")
+        else:
+            flash("Request not found or already decided.", "error")
+        return redirect(url_for("casino_access_page"))
+
+    @app.route("/admin/casino/access/unlock/<int:uid>", methods=["POST"])
+    @login_required
+    def casino_access_unlock(uid: int):
+        csrf_check()
+        if CAS.is_owner(uid):
+            flash("Owner is always unlocked.", "error")
+            return redirect(url_for("casino_access_page"))
+        CAS.unlock(uid)
+        audit_record(current_admin_id(), "casino_access_unlock",
+                     target=str(uid), ip=request.remote_addr,
+                     admin_name=current_admin_name())
+        flash(f"Casino UNLOCKED for user {uid}.")
+        return redirect(url_for("casino_access_page"))
+
+    @app.route("/admin/casino/access/lock/<int:uid>", methods=["POST"])
+    @login_required
+    def casino_access_lock(uid: int):
+        csrf_check()
+        if CAS.is_owner(uid):
+            flash("Owner cannot be locked.", "error")
+            return redirect(url_for("casino_access_page"))
+        CAS.lock(uid)
+        audit_record(current_admin_id(), "casino_access_lock",
+                     target=str(uid), ip=request.remote_addr,
+                     admin_name=current_admin_name())
+        flash(f"Casino LOCKED for user {uid}.")
+        return redirect(url_for("casino_access_page"))
+
+    # ---------------- Config / toggle / trigger ----------------
     @app.route("/admin/casino/save", methods=["POST"])
     @login_required
     def casino_save():
@@ -271,7 +378,7 @@ def register_casino_admin_routes(app, login_required, csrf_check, csrf_token,
         flash(f"Deleted {n} runs.")
         return redirect(url_for("casino_page"))
 
-    # -------------------- Export: HTML + PDF --------------------
+    # ---------------- Export ----------------
     @app.route("/admin/casino/export", methods=["GET"])
     @login_required
     def casino_export_page():
@@ -342,10 +449,25 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     def _owner_id() -> int:
         return int(CONFIG.get("owner_id", 338266658))
 
+    # ---------------- Casino page (locked or full) ----------------
     @bp.route("/casino")
     @login_required
     def casino_page():
         uid = get_uid()
+        is_admin = (uid == _owner_id())
+
+        # ---- Access check ----
+        if CAS.is_locked(uid):
+            pending_req = db.find_pending_request(uid, "casino_access")
+            body = render_template_string(
+                CP.CASINO_LOCKED_TEMPLATE,
+                is_admin=is_admin,
+                pending=pending_req,
+                csrf=csrf_token(),
+            )
+            return render_layout("Casino (Locked)", body, "casino")
+
+        # ---- Unlocked: show normal casino page ----
         cfg = CAS.get_config(uid)
         stats = db.casino_stats(uid)
         runs = db.list_casino_runs(uid, limit=30)
@@ -353,7 +475,6 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         _enrich_cfg_times(cfg)
         _enrich_runs(runs)
 
-        is_admin = (uid == _owner_id())
         can_edit_chat = is_admin
         can_edit_bet = True
         can_edit_interval = True
@@ -367,11 +488,44 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
         )
         return render_layout("Casino", body, "casino")
 
+    # ---------------- Request access ----------------
+    @bp.route("/casino/request_access", methods=["POST"])
+    @login_required
+    def casino_request_access():
+        csrf_check()
+        uid = get_uid()
+
+        if not CAS.is_locked(uid):
+            flash("Casino is already unlocked for you.", "error")
+            return redirect(url_for("user.casino_page"))
+
+        existing = db.find_pending_request(uid, "casino_access")
+        if existing:
+            flash("You already have a pending request. Please wait.",
+                  "error")
+            return redirect(url_for("user.casino_page"))
+
+        note = (request.form.get("note") or "").strip()[:500]
+        req = RM.create_casino_access_request(uid, note=note)
+        log_flask.info(
+            f"user requested casino access uid={uid} req={req.get('id')}"
+        )
+        flash(
+            "Request sent to admin. You will be notified when approved."
+        )
+        return redirect(url_for("user.casino_page"))
+
+    # ---------------- Config / toggle / trigger ----------------
     @bp.route("/casino/save", methods=["POST"])
     @login_required
     def casino_save():
         csrf_check()
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            flash("Casino is locked. Request access first.", "error")
+            return redirect(url_for("user.casino_page"))
+
         cfg = CAS.get_config(uid)
         is_admin = (uid == _owner_id())
 
@@ -425,6 +579,11 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     def casino_toggle():
         csrf_check()
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            flash("Casino is locked. Request access first.", "error")
+            return redirect(url_for("user.casino_page"))
+
         cfg = CAS.get_config(uid)
         new_state = not cfg["enabled"]
         if new_state and not cfg["chat_id"]:
@@ -452,6 +611,11 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     def casino_trigger():
         csrf_check()
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            flash("Casino is locked. Request access first.", "error")
+            return redirect(url_for("user.casino_page"))
+
         try:
             from app import _get_runtime
             from .bootstrap import _async_loop
@@ -476,15 +640,25 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     def casino_clear_runs():
         csrf_check()
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            flash("Casino is locked.", "error")
+            return redirect(url_for("user.casino_page"))
+
         n = db.clear_casino_runs(uid)
         flash(f"Deleted {n} runs.")
         return redirect(url_for("user.casino_page"))
 
-    # -------------------- Export: HTML + PDF --------------------
+    # ---------------- Export ----------------
     @bp.route("/casino/export", methods=["GET"])
     @login_required
     def casino_export_page():
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            flash("Casino is locked.", "error")
+            return redirect(url_for("user.casino_page"))
+
         filter_mode = request.args.get("filter", "all")
         all_runs = db.list_casino_runs(uid, limit=500)
         counts = _compute_filter_counts(all_runs)
@@ -502,6 +676,10 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     @login_required
     def casino_export_html():
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            return "Casino is locked", 403
+
         filter_mode = request.args.get("filter", "all")
         try:
             html = EXP.render_html(uid, filter_mode, limit=500)
@@ -523,6 +701,10 @@ def register_casino_user_routes(bp, login_required, csrf_check, csrf_token,
     @login_required
     def casino_export_pdf():
         uid = get_uid()
+
+        if CAS.is_locked(uid):
+            return "Casino is locked", 403
+
         filter_mode = request.args.get("filter", "all")
         try:
             pdf_bytes = EXP.render_pdf(uid, filter_mode, limit=500)

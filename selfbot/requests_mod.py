@@ -1,4 +1,8 @@
-"""User requests: diamonds or subscription. Admin approves/rejects."""
+"""User requests: diamonds / subscription / casino access.
+
+Admin approves/rejects. Casino access is a special request type
+that when approved unlocks the casino feature for the user.
+"""
 from datetime import datetime, timezone as dt_timezone
 from typing import List, Optional
 
@@ -11,10 +15,31 @@ def _now_iso() -> str:
     return datetime.now(dt_timezone.utc).isoformat()
 
 
+# ===========================================================================
+# Queries
+# ===========================================================================
 def all_requests() -> List[dict]:
     return db.list_requests(limit=5000)
 
 
+def pending() -> List[dict]:
+    return db.list_requests(status="pending", limit=500)
+
+
+def for_user(user_id: int) -> List[dict]:
+    return db.list_requests(user_id=user_id, limit=200)
+
+
+def get(req_id: str) -> Optional[dict]:
+    for r in all_requests():
+        if r.get("id") == req_id:
+            return r
+    return None
+
+
+# ===========================================================================
+# Create requests
+# ===========================================================================
 def create_diamond_request(user_id: int, amount: int, note: str = "") -> dict:
     amount = max(1, min(10000, int(amount)))
     req = {
@@ -54,32 +79,60 @@ def create_subscription_request(user_id: int, plan: str, note: str = "") -> dict
     return req
 
 
-def pending() -> List[dict]:
-    return db.list_requests(status="pending", limit=500)
+def create_casino_access_request(user_id: int, note: str = "") -> dict:
+    """Create (or return existing pending) request to unlock casino access."""
+    # Reject if there is already a pending request
+    existing = db.find_pending_request(int(user_id), "casino_access")
+    if existing:
+        log.info(
+            f"casino_access request already pending for user={user_id} "
+            f"id={existing['id']}"
+        )
+        return existing
+
+    req = {
+        "id": f"req_{int(datetime.now().timestamp() * 1000)}_{user_id}",
+        "user_id": int(user_id),
+        "type": "casino_access",
+        "amount": None,
+        "plan": None,
+        "note": note or "",
+        "status": "pending",
+        "created_at": _now_iso(),
+        "decided_at": None,
+        "decided_by": None,
+    }
+    db.add_request(req)
+    log.info(f"casino_access request created user={user_id} id={req['id']}")
+    return req
 
 
-def for_user(user_id: int) -> List[dict]:
-    return db.list_requests(user_id=user_id, limit=200)
-
-
-def get(req_id: str) -> Optional[dict]:
-    for r in all_requests():
-        if r.get("id") == req_id:
-            return r
-    return None
-
-
+# ===========================================================================
+# Approve / Reject
+# ===========================================================================
 def approve(req_id: str, admin_id: int = 0) -> Optional[dict]:
     for r in all_requests():
         if r.get("id") != req_id or r.get("status") != "pending":
             continue
+
         db.update_request(
             req_id, status="approved", decided_at=_now_iso(),
             decided_by=int(admin_id),
         )
-        if r["type"] == "diamonds":
-            grant(int(r["user_id"]), int(r["amount"]), "request_approved",
-                  meta={"req": req_id})
+
+        # apply side-effects by type
+        try:
+            if r["type"] == "diamonds":
+                grant(int(r["user_id"]), int(r["amount"]),
+                      "request_approved", meta={"req": req_id})
+            elif r["type"] == "casino_access":
+                db.set_casino_unlocked(int(r["user_id"]), True)
+                log.info(
+                    f"casino_access approved user={r['user_id']} by={admin_id}"
+                )
+        except Exception as e:
+            log.warning(f"approve side-effect failed for {req_id}: {e}")
+
         log.info(f"request approved id={req_id} by={admin_id}")
         return r
     return None
@@ -89,6 +142,7 @@ def reject(req_id: str, admin_id: int = 0) -> Optional[dict]:
     for r in all_requests():
         if r.get("id") != req_id or r.get("status") != "pending":
             continue
+
         db.update_request(
             req_id, status="rejected", decided_at=_now_iso(),
             decided_by=int(admin_id),
@@ -98,6 +152,9 @@ def reject(req_id: str, admin_id: int = 0) -> Optional[dict]:
     return None
 
 
+# ===========================================================================
+# Stats
+# ===========================================================================
 def approval_rate_series(days: int = 14) -> List[dict]:
     from datetime import timedelta
     today = datetime.now(dt_timezone.utc).date()
@@ -115,3 +172,16 @@ def approval_rate_series(days: int = 14) -> List[dict]:
         if d in buckets:
             buckets[d][r["status"]] += 1
     return list(buckets.values())
+
+
+# ===========================================================================
+# Casino access helpers
+# ===========================================================================
+def pending_casino_requests() -> List[dict]:
+    return db.list_requests(
+        status="pending", req_type="casino_access", limit=500
+    )
+
+
+def user_has_pending_casino_request(user_id: int) -> bool:
+    return db.find_pending_request(int(user_id), "casino_access") is not None

@@ -63,6 +63,17 @@ def _redirect_home():
     return redirect(url_for("user.dashboard"))
 
 
+def _is_casino_locked() -> bool:
+    """Return True if current user is locked out of casino."""
+    try:
+        uid = _current_uid()
+        if not uid:
+            return True
+        return CAS.is_locked(int(uid))
+    except Exception:
+        return True
+
+
 # ===========================================================================
 # BASE TEMPLATE — dark theme, synced with admin
 # ===========================================================================
@@ -315,6 +326,18 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 
 .nav-link:hover svg, .nav-link.active svg { opacity: 1; }
+
+.nav-badge {
+  margin-left: auto;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+  font-weight: 600;
+  line-height: 1.5;
+}
 
 .sidebar-footer {
   margin-top: auto;
@@ -711,9 +734,7 @@ code {
   color: var(--text);
 }
 
-/* ==========================================================================
-   OTP LOGIN PAGE
-   ========================================================================== */
+/* OTP LOGIN PAGE */
 .otp-page {
   min-height: 100vh;
   display: grid;
@@ -1463,7 +1484,7 @@ ACCOUNT_TEMPLATE = r"""
 
 
 # ===========================================================================
-# SIDEBAR (shared)
+# SIDEBAR (shared) — with casino lock badge
 # ===========================================================================
 SIDEBAR = r"""
 <aside class="sidebar">
@@ -1507,6 +1528,9 @@ SIDEBAR = r"""
   <a href="{{ url_for('user.casino_page') }}" class="nav-link {{ 'active' if active=='casino' else '' }}">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
     Casino
+    {% if casino_locked %}
+    <span class="nav-badge">🔒</span>
+    {% endif %}
   </a>
 
   <div class="sidebar-footer">
@@ -1524,6 +1548,15 @@ SIDEBAR = r"""
 
 
 def _render_layout(title: str, body: str, active: str = "dashboard"):
+    # compute casino_locked for the sidebar badge
+    casino_locked = False
+    try:
+        uid = _current_uid()
+        if uid:
+            casino_locked = CAS.is_locked(int(uid))
+    except Exception:
+        pass
+
     full = (
         '<div class="layout">'
         + SIDEBAR
@@ -1534,9 +1567,15 @@ def _render_layout(title: str, body: str, active: str = "dashboard"):
         + body
         + '</main></div>'
     )
-    return render_template_string(BASE_TEMPLATE, title=title, body=render_template_string(
-        full, active=active
-    ))
+    return render_template_string(
+        BASE_TEMPLATE,
+        title=title,
+        body=render_template_string(
+            full,
+            active=active,
+            casino_locked=casino_locked,
+        ),
+    )
 
 
 def _get_uid_or_redirect():
@@ -1847,6 +1886,14 @@ def request_subscription():
 # Casino routes (register on blueprint)
 # ===========================================================================
 def _render_layout_for_casino(title: str, body: str, active: str = "casino"):
+    casino_locked = False
+    try:
+        uid = _current_uid()
+        if uid:
+            casino_locked = CAS.is_locked(int(uid))
+    except Exception:
+        pass
+
     full = (
         '<div class="layout">'
         + SIDEBAR
@@ -1854,8 +1901,15 @@ def _render_layout_for_casino(title: str, body: str, active: str = "casino"):
         + body
         + '</main></div>'
     )
-    return render_template_string(BASE_TEMPLATE, title=title,
-                                   body=render_template_string(full, active=active))
+    return render_template_string(
+        BASE_TEMPLATE,
+        title=title,
+        body=render_template_string(
+            full,
+            active=active,
+            casino_locked=casino_locked,
+        ),
+    )
 
 
 def _get_uid_for_casino():

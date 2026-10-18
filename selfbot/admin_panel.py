@@ -1142,6 +1142,16 @@ code {
       Transactions
     </a>
 
+    <div class="nav-group">Automation</div>
+    <a href="{{ url_for('casino_page') }}" class="nav-link {{ 'active' if page=='casino' else '' }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+      Casino
+    </a>
+    <a href="{{ url_for('casino_access_page') }}" class="nav-link {{ 'active' if page=='casino_access' else '' }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Casino Access
+    </a>
+
     <div class="nav-group">System</div>
     <a href="{{ url_for('shop_page') }}" class="nav-link {{ 'active' if page=='shop' else '' }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
@@ -1421,7 +1431,7 @@ USERS_TEMPLATE = r"""
     <thead>
       <tr>
         <th>ID</th><th>Name</th><th>Username</th><th>Plan</th>
-        <th>Days</th><th>Diamonds</th><th>Status</th><th class="text-right"></th>
+        <th>Days</th><th>Diamonds</th><th>Casino</th><th>Status</th><th class="text-right"></th>
       </tr>
     </thead>
     <tbody>
@@ -1440,6 +1450,13 @@ USERS_TEMPLATE = r"""
       <td class="mono">{{ u.days }}</td>
       <td class="mono">{{ u.diamonds }}</td>
       <td>
+        {% if u.casino_unlocked %}
+          <span class="badge green">unlocked</span>
+        {% else %}
+          <span class="badge amber">locked</span>
+        {% endif %}
+      </td>
+      <td>
         {% if u.banned %}<span class="badge red">banned</span>
         {% else %}<span class="badge green">active</span>{% endif %}
       </td>
@@ -1448,7 +1465,7 @@ USERS_TEMPLATE = r"""
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="empty"><div class="empty-icon">👥</div>No users yet.</td></tr>
+    <tr><td colspan="9" class="empty"><div class="empty-icon">👥</div>No users yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -1478,6 +1495,29 @@ USER_DETAIL_TEMPLATE = r"""
   <div class="stat"><div class="k">Plan</div><div class="v" style="font-size:22px">{{ u.plan }}</div></div>
   <div class="stat"><div class="k">Days left</div><div class="v">{{ u.days }}</div></div>
   <div class="stat"><div class="k">Referral code</div><div class="v mono" style="font-size:15px">{{ u.referral_code }}</div></div>
+</div>
+
+<div class="card">
+  <h2>Casino access</h2>
+  <p class="muted" style="font-size:13px;margin-bottom:12px">
+    {% if u.casino_unlocked %}
+      This user currently has <strong style="color:var(--green)">casino access</strong>.
+    {% else %}
+      This user is currently <strong style="color:var(--amber)">locked</strong> out of casino.
+    {% endif %}
+  </p>
+  {% if u.casino_unlocked %}
+  <form method="post" action="{{ url_for('casino_access_lock', uid=u.id) }}" style="display:inline"
+        onsubmit="return confirm('Lock casino access for this user?');">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn btn-danger">🔒 Lock casino</button>
+  </form>
+  {% else %}
+  <form method="post" action="{{ url_for('casino_access_unlock', uid=u.id) }}" style="display:inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn btn-success">🔓 Unlock casino</button>
+  </form>
+  {% endif %}
 </div>
 
 <div class="grid-2">
@@ -2042,6 +2082,7 @@ def build_admin_app() -> Flask:
                 "days": days_left(uid),
                 "diamonds": int(u.get("diamonds", 0) or 0),
                 "banned": bool(u.get("banned", False)),
+                "casino_unlocked": bool(u.get("casino_unlocked", 0)),
             })
         enriched.sort(key=lambda x: x["id"])
         body = render_template_string(USERS_TEMPLATE, users=enriched)
@@ -2061,6 +2102,7 @@ def build_admin_app() -> Flask:
                 "days": days_left(uid),
                 "referral_code": u.get("referral_code", "—"),
                 "banned": bool(u.get("banned", False)),
+                "casino_unlocked": bool(u.get("casino_unlocked", 0)),
                 "created_at": u.get("created_at", ""),
             },
             plans=list(PLANS.keys()),

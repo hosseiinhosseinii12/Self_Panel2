@@ -75,11 +75,13 @@ CREATE TABLE IF NOT EXISTS users (
     job_target INTEGER,
     web_token TEXT DEFAULT '',
     session_string TEXT DEFAULT '',
-    data TEXT DEFAULT '{}'
+    data TEXT DEFAULT '{}',
+    casino_unlocked INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_users_web_token ON users(web_token);
 CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code);
 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
+CREATE INDEX IF NOT EXISTS idx_users_casino_unlocked ON users(casino_unlocked);
 
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
@@ -125,6 +127,7 @@ CREATE TABLE IF NOT EXISTS requests (
 );
 CREATE INDEX IF NOT EXISTS idx_req_user ON requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_req_status ON requests(status);
+CREATE INDEX IF NOT EXISTS idx_req_type ON requests(type);
 
 CREATE TABLE IF NOT EXISTS audit (
     id TEXT PRIMARY KEY,
@@ -232,7 +235,7 @@ CREATE TABLE IF NOT EXISTS text_format_settings (
 );
 
 -- =====================================================================
--- Casino automator tables (no meow/meowie-profile columns)
+-- Casino automator tables
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS casino_config (
@@ -321,6 +324,7 @@ def init_db() -> None:
             "web_token": "TEXT DEFAULT ''",
             "session_string": "TEXT DEFAULT ''",
             "data": "TEXT DEFAULT '{}'",
+            "casino_unlocked": "INTEGER DEFAULT 0",
         }
         for col, decl in wanted.items():
             if col not in cols:
@@ -452,6 +456,30 @@ def find_user_by_username(username: str) -> Optional[int]:
         (clean.lower(),)
     ).fetchone()
     return int(row["id"]) if row else None
+
+
+# ===========================================================================
+# Casino access lock
+# ===========================================================================
+def is_casino_unlocked(user_id: int) -> bool:
+    u = get_user(user_id)
+    if not u:
+        return False
+    return bool(u.get("casino_unlocked", 0))
+
+
+def set_casino_unlocked(user_id: int, unlocked: bool) -> None:
+    _ensure_ready()
+    upsert_user(user_id, casino_unlocked=1 if unlocked else 0)
+
+
+def list_casino_unlocked_users() -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM users WHERE casino_unlocked = 1 ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ===========================================================================
@@ -658,6 +686,7 @@ def update_request(req_id: str, **fields) -> None:
 
 def list_requests(status: Optional[str] = None,
                   user_id: Optional[int] = None,
+                  req_type: Optional[str] = None,
                   limit: int = 200) -> List[dict]:
     _ensure_ready()
     conn = get_conn()
@@ -669,10 +698,24 @@ def list_requests(status: Optional[str] = None,
     if user_id is not None:
         q += " AND user_id = ?"
         vals.append(int(user_id))
+    if req_type:
+        q += " AND type = ?"
+        vals.append(req_type)
     q += " ORDER BY created_at DESC LIMIT ?"
     vals.append(int(limit))
     rows = conn.execute(q, vals).fetchall()
     return [dict(r) for r in rows]
+
+
+def find_pending_request(user_id: int, req_type: str) -> Optional[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM requests WHERE user_id = ? AND type = ? "
+        "AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        (int(user_id), req_type),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ===========================================================================

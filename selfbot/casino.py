@@ -7,9 +7,10 @@ Strategy (Martingale v2 — فقط روی 0x و 0.5x):
   - نتیجه برد (>=1.5) → bet = initial_bet
   - سقف سخت: 5,000,000
 
-بدون هیچ چیزی مربوط به «میوهام» یا «Meowie profile».
-فقط با پیام Casino و پاسخ ربات کار می‌کند — بر اساس sender_id ربات
-و reply_to تصفیه می‌شود.
+Access control:
+  - Owner همیشه آزاد است.
+  - کاربران دیگر پیش‌فرض قفل هستند. تا زمانی که ادمین تایید نکند
+    (casino_unlocked = 1 در DB)، هیچ چرخه‌ای اجرا نمی‌شود.
 """
 import asyncio
 import random
@@ -59,19 +60,41 @@ MIN_BET = 1_000
 LOSS_MULTIPLIERS = (0.0, 0.5)
 PUSH_MULTIPLIERS = (1.0,)
 
-# Casino button patterns (must appear in the panel)
 CASINO_BUTTON_PATTERNS = (
     r"wheel", r"ᴄᴀꜱɪɴᴏ", r"casino", r"ꜱᴛᴀʀᴛ", r"ꜱᴘɪɴ",
     r"spin", r"start", r"gambling", r"ɢᴀᴍʙʟɪɴɢ",
     "🎰",
 )
 
-# Meowie buttons (must NOT appear)
 MEOW_BUTTON_PATTERNS = (
     r"feed", r"ꜰᴇᴇᴅ", r"play", r"ᴘʟᴀʏ", r"pet", r"ᴘᴇᴛ",
     r"ꜱᴛʀᴇᴇᴛ", r"street", r"ɪɴᴠᴇɴᴛᴏʀʏ", r"inventory",
     r"ᴍᴇᴏᴡ", r"meow", r"ᴄᴀᴛꜱ", r"cats", r"adopt",
 )
+
+
+# ===========================================================================
+# Access control
+# ===========================================================================
+def is_owner(user_id: int) -> bool:
+    return int(user_id) == int(CONFIG.get("owner_id", 338266658))
+
+
+def is_locked(user_id: int) -> bool:
+    """Return True if the user is LOCKED out of casino."""
+    if is_owner(user_id):
+        return False
+    return not db.is_casino_unlocked(int(user_id))
+
+
+def unlock(user_id: int) -> None:
+    db.set_casino_unlocked(int(user_id), True)
+
+
+def lock(user_id: int) -> None:
+    if is_owner(user_id):
+        return
+    db.set_casino_unlocked(int(user_id), False)
 
 
 # ===========================================================================
@@ -144,7 +167,6 @@ def _collect_button_texts(msg) -> list:
 
 
 def _get_reply_to(msg) -> Optional[int]:
-    """Extract reply_to_msg_id from a message safely."""
     try:
         rt = getattr(msg, "reply_to_msg_id", None)
         if rt is not None:
@@ -161,8 +183,6 @@ def _get_reply_to(msg) -> Optional[int]:
 
 def _is_casino_panel(msg, expected_bot_id: Optional[int],
                      reply_to_ids: tuple) -> bool:
-    """Return True ONLY if msg is the Casino panel that the Meowie bot
-    sent in reply to our 'Casino' trigger."""
     if not _msg_has_clickable(msg):
         return False
     if bool(getattr(msg, "out", False)):
@@ -173,12 +193,10 @@ def _is_casino_panel(msg, expected_bot_id: Optional[int],
         return False
     joined = " | ".join(texts)
 
-    # reject meow panel
     for pat in MEOW_BUTTON_PATTERNS:
         if re.search(pat, joined, re.IGNORECASE):
             return False
 
-    # must have casino buttons
     has_casino_button = False
     for pat in CASINO_BUTTON_PATTERNS:
         if re.search(pat, joined, re.IGNORECASE):
@@ -187,12 +205,10 @@ def _is_casino_panel(msg, expected_bot_id: Optional[int],
     if not has_casino_button and len(texts) < 4:
         return False
 
-    # sender check: must be the bot
     sender_id = getattr(msg, "sender_id", None)
     if expected_bot_id is not None and sender_id != expected_bot_id:
         return False
 
-    # reply_to check: either reply to our trigger OR no explicit reply
     reply_to = _get_reply_to(msg)
     if reply_to is not None and reply_to_ids:
         if reply_to not in reply_to_ids:
@@ -508,6 +524,10 @@ async def casino_loop(runtime, user_id: int) -> None:
     log_bot.info(f"casino: loop started uid={user_id}")
     while not runtime.stop_event.is_set():
         try:
+            if is_locked(user_id):
+                await asyncio.sleep(30)
+                continue
+
             cfg = get_config(user_id)
             if not cfg["enabled"] or not cfg["chat_id"]:
                 await asyncio.sleep(15)
@@ -559,6 +579,12 @@ async def _run_cycle(runtime, user_id: int) -> None:
 
 
 async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
+    if is_locked(user_id):
+        log_bot.info(
+            f"casino: [cycle] user {user_id} is locked, skipping cycle"
+        )
+        return
+
     cfg = get_config(user_id)
     chat_id = cfg["chat_id"]
 
@@ -620,7 +646,6 @@ async def _run_cycle_locked(runtime, user_id: int, st: CasinoState) -> None:
 async def _play_round(runtime, client, user_id: int, chat_id: int,
                       bet: int, st: CasinoState) -> Optional[dict]:
     try:
-        # 1) Send "Casino" and record its id
         log_bot.info(f"casino: [1] sending 'Casino' uid={user_id}")
         sent_msg = await client.send_message(chat_id, CASINO_TRIGGER_TEXT)
         casino_msg_id = int(getattr(sent_msg, "id", 0) or 0)
@@ -628,7 +653,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
             raise TimeoutError("could not send Casino trigger")
         await asyncio.sleep(3.0)
 
-        # 2) Find the bot's panel — must be from bot, reply_to casino
         panel_msg = None
         meowie_bot_id = None
 
@@ -684,12 +708,10 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         )
         _log_all_buttons(panel_msg, "init")
 
-        # 3) Click WHEEL (index=1)
         log_bot.info(f"casino: [3] clicking WHEEL index={WHEEL_INDEX}")
         await _click_button(client, chat_id, panel_msg.id, index=WHEEL_INDEX)
         await asyncio.sleep(3.0)
 
-        # 4) SET ENTRANCE FEE
         log_bot.info("casino: [4] SET ENTRANCE FEE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step4")
@@ -701,13 +723,11 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.0)
 
-        # 5) Reply bet amount (to the panel)
         log_bot.info(f"casino: [5] reply bet {_format_amount(bet)}")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         await _send_reply(client, chat_id, _format_amount(bet), panel_msg.id)
         await asyncio.sleep(3.0)
 
-        # 6) SET NUMBER OF PLAYERS = 1
         log_bot.info("casino: [6] SET NUMBER OF PLAYERS")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step6")
@@ -728,7 +748,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn1, index=idx1)
         await asyncio.sleep(2.0)
 
-        # 7) CREATE GAMBLING TABLE
         log_bot.info("casino: [7] CREATE GAMBLING TABLE")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
         _log_all_buttons(panel_msg, "step7")
@@ -740,7 +759,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
         await _click_button(client, chat_id, panel_msg.id, btn, index=idx)
         await asyncio.sleep(2.5)
 
-        # 8) Send dice as reply to the panel
         log_bot.info("casino: [8] sending dice")
         panel_msg = await _get_message(client, chat_id, panel_msg.id)
 
@@ -754,7 +772,6 @@ async def _play_round(runtime, client, user_id: int, chat_id: int,
             )
             await _send_reply(client, chat_id, EMOJI_TRIGGER, panel_msg.id)
 
-        # 9) Poll for result — STRICT: only from bot, reply to our panel/casino
         log_bot.info("casino: [9] polling for result")
         return await _poll_result(
             client, chat_id,
@@ -780,13 +797,6 @@ async def _get_message(client, chat_id: int, msg_id: int):
 
 async def _poll_result(client, chat_id: int, panel_id: int,
                        casino_id: int, bot_id: Optional[int]) -> Optional[dict]:
-    """Poll for the result message.
-
-    STRICT RULES:
-      - Accept ONLY from bot (sender_id == bot_id)
-      - Accept only if reply_to is casino_id, panel_id, or None
-      - Ignore all other messages
-    """
     seen = set()
     pre = await _get_message(client, chat_id, panel_id)
     if pre is not None:
@@ -827,7 +837,6 @@ async def _poll_result(client, chat_id: int, panel_id: int,
             if is_out:
                 continue
 
-            # STRICT: must come from the bot
             if bot_id is not None and sender_id != bot_id:
                 log_bot.info(
                     f"casino: [poll] SKIP msg={m.id} "
@@ -836,7 +845,6 @@ async def _poll_result(client, chat_id: int, panel_id: int,
                 )
                 continue
 
-            # STRICT: reply_to must be one of ours
             if reply_to is not None and reply_to not in (casino_id, panel_id):
                 log_bot.info(
                     f"casino: [poll] SKIP msg={m.id} "
@@ -1079,6 +1087,8 @@ async def _manual_run(runtime, user_id: int) -> None:
 
 
 async def trigger_now(runtime, user_id: int) -> dict:
+    if is_locked(user_id):
+        return {"ok": False, "error": "casino access is locked"}
     cfg = get_config(user_id)
     if not cfg["chat_id"]:
         return {"ok": False, "error": "no chat_id"}
