@@ -234,10 +234,6 @@ CREATE TABLE IF NOT EXISTS text_format_settings (
     updated_at TEXT DEFAULT ''
 );
 
--- =====================================================================
--- Casino automator tables
--- =====================================================================
-
 CREATE TABLE IF NOT EXISTS casino_config (
     user_id INTEGER PRIMARY KEY,
     enabled INTEGER DEFAULT 0,
@@ -302,13 +298,21 @@ CREATE INDEX IF NOT EXISTS idx_casino_logs_user ON casino_logs(user_id);
 """
 
 
+def _add_column_if_missing(conn, table: str, col: str, decl: str) -> None:
+    """Safely add a column. Ignores errors."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    except Exception:
+        pass
+
+
 def init_db() -> None:
     global _initialized
     with _init_lock:
         conn = get_conn()
         conn.executescript(SCHEMA)
 
-        # ensure newer columns exist on 'users'
+        # ---- users: ensure newer columns exist ----
         cur = conn.execute("PRAGMA table_info(users)")
         cols = {row["name"] for row in cur.fetchall()}
         wanted = {
@@ -328,12 +332,9 @@ def init_db() -> None:
         }
         for col, decl in wanted.items():
             if col not in cols:
-                try:
-                    conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
-                except Exception:
-                    pass
+                _add_column_if_missing(conn, "users", col, decl)
 
-        # ensure newer columns exist on 'casino_config'
+        # ---- casino_config: ensure newer columns exist ----
         cur = conn.execute("PRAGMA table_info(casino_config)")
         ccols = {row["name"] for row in cur.fetchall()}
         cwanted = {
@@ -351,10 +352,7 @@ def init_db() -> None:
         }
         for col, decl in cwanted.items():
             if col not in ccols:
-                try:
-                    conn.execute(f"ALTER TABLE casino_config ADD COLUMN {col} {decl}")
-                except Exception:
-                    pass
+                _add_column_if_missing(conn, "casino_config", col, decl)
 
         _initialized = True
 
