@@ -5,8 +5,10 @@ Workflow:
   2. Exclude: bots, deleted, owner, self-bot account, target members,
      admins of source, admins of target.
   3. For each remaining user:
-       a. Try `InviteToChannel` (direct add).
-       b. If direct add fails (privacy / not mutual), send invite link via PV.
+       a. Try direct add (InviteToChannel for Channels/supergroups,
+          AddChatUser for legacy small groups).
+       b. If direct add fails (privacy / not mutual / cast error),
+          send invite link via PV.
        c. If send link fails (blocked), mark as failed.
   4. Each invite link is used for AT MOST `batch_size` (default 10) users.
   5. After that, revoke and create a new invite link.
@@ -14,12 +16,14 @@ Workflow:
   7. Adaptive rate-limit: pause every N successful sends.
 
 Cancellation:
-  - A running job can be cancelled via `cancel_job(job_id)` which sets an
-    in-memory flag. The run loop checks `is_cancelled(job_id)` at the top
-    of every iteration and stops gracefully (status="cancelled").
+  - A running job can be cancelled via `cancel_job(job_id)` which sets a
+    `threading.Event`. The run loop checks `is_cancelled(job_id)` at the
+    top of every iteration and also between small sleep chunks, so it can
+    stop within ~1 second after the request.
 """
 import asyncio
 import secrets
+import threading
 import traceback
 from datetime import datetime, timezone as dt_timezone
 from typing import Optional
@@ -38,7 +42,10 @@ try:
         InviteHashExpiredError, InviteHashInvalidError,
         UserIsBlockedError, YouBlockedUserError, InputUserDeactivatedError,
     )
-    from telethon.tl.types import ChannelParticipantsAdmins
+    from telethon.tl.types import (
+        ChannelParticipantsAdmins,
+        Channel, Chat, User,
+    )
     HAS_TELETHON = True
 except ImportError:
     HAS_TELETHON = False
@@ -59,8 +66,10 @@ RATE_LIMIT_PAUSE = 60
 
 LINK_TTL_HOURS = 24
 
-# In-memory cancel flags: {job_id: True}
-_CANCEL_FLAGS: dict = {}
+# In-memory cancel events: {job_id: threading.Event}
+# threading.Event is thread-safe, so the Flask request thread and the
+# asyncio loop thread can safely share it.
+_CANCEL_EVENTS: dict = {}
 
 
 def _rand_id() -> str:
@@ -71,12 +80,22 @@ def _now_iso() -> str:
     return datetime.now(dt_timezone.utc).isoformat()
 
 
+def _is_channel(entity) -> bool:
+    """Supergroup or broadcast channel."""
+    return isinstance(entity, Channel)
+
+
+def _is_basic_chat(entity) -> bool:
+    """Legacy small group (not a supergroup)."""
+    return isinstance(entity, Chat) and not isinstance(entity, Channel)
+
+
 # ===========================================================================
 # Job management
 # ===========================================================================
 def create_job(user_id: int, source_chat: str, target_chat: str,
-                batch_size: int = DEFAULT_BATCH_SIZE,
-                delay_seconds: int = DEFAULT_DELAY) -> dict:
+               batch_size: int = DEFAULT_BATCH_SIZE,
+               delay_seconds: int = DEFAULT_DELAY) -> dict:
     batch_size = max(1, min(MAX_BATCH_SIZE, int(batch_size)))
     delay_seconds = max(MIN_DELAY, min(MAX_DELAY, int(delay_seconds)))
 
@@ -106,7 +125,7 @@ def delete_job(job_id: str) -> bool:
         log_bot.warning(f"invite: refusing delete of running job {job_id}")
         return False
     db.delete_invite_job(job_id)
-    _CANCEL_FLAGS.pop(job_id, None)
+    _CANCEL_EVENTS.pop(job_id, None)
     log_bot.info(f"invite: deleted job {job_id}")
     return True
 
@@ -185,20 +204,43 @@ def update_job(job_id: str, source_chat: Optional[str] = None,
     return True, ""
 
 
+# ===========================================================================
+# Cancel (Stop)
+# ===========================================================================
 def cancel_job(job_id: str) -> tuple:
+    """Request cancellation of a running job.
+
+    Uses threading.Event, which is atomic and safe to set from a Flask
+    request thread while the asyncio loop thread checks it.
+    """
     job = db.get_invite_job(job_id)
     if not job:
         return False, "Job not found."
+
     status = (job.get("status") or "").lower()
     if status != "running":
         return False, f"Job is not running (current status: {status})."
-    _CANCEL_FLAGS[job_id] = True
-    log_bot.info(f"invite: cancel requested for job {job_id}")
-    return True, "Cancellation requested. Job will stop after the current member."
+
+    ev = _CANCEL_EVENTS.get(job_id)
+    if ev is None:
+        # The runner hasn't registered its event yet (or it's between runs).
+        # Try DB-only fallback: mark a flag row? For now: fail with a clear msg.
+        log_bot.warning(
+            f"invite: cancel requested for {job_id} but no Event registered"
+        )
+        return False, (
+            "Runner not active yet. The job may have just started — "
+            "wait a second and try Stop again."
+        )
+
+    ev.set()
+    log_bot.info(f"invite: STOP event SET for job {job_id}")
+    return True, "Stop requested. The job will halt within ~1 second."
 
 
 def is_cancelled(job_id: str) -> bool:
-    return bool(_CANCEL_FLAGS.get(job_id, False))
+    ev = _CANCEL_EVENTS.get(job_id)
+    return bool(ev and ev.is_set())
 
 
 # ===========================================================================
@@ -277,6 +319,89 @@ async def _list_admins(client, chat) -> set:
 
 
 # ===========================================================================
+# Direct-add helpers (handles both Channel and legacy Chat)
+# ===========================================================================
+async def _try_direct_add(client, target, uid: int) -> tuple:
+    """Try to add a user directly.
+
+    Returns (method, status, error):
+      - method: 'direct' if any add attempt was made, else None
+      - status: 'success' / 'failed' / 'skipped' / 'fallback'
+      - error:  human-readable error string (or '')
+    """
+    # ---- Channel (supergroup / broadcast) ----
+    if _is_channel(target):
+        try:
+            await client(functions.channels.InviteToChannelRequest(
+                channel=target, users=[uid],
+            ))
+            return "direct", "success", ""
+        except UserPrivacyRestrictedError:
+            return "direct", "fallback", "privacy_restricted"
+        except UserNotMutualContactError:
+            return "direct", "fallback", "not_mutual"
+        except UserChannelsTooMuchError:
+            return "direct", "failed", "user in too many channels"
+        except UserAlreadyParticipantError:
+            return "direct", "skipped", "already participant"
+        except UserKickedError:
+            return "direct", "failed", "user kicked from target"
+        except FloodWaitError as e:
+            log_bot.warning(
+                f"invite: flood wait {e.seconds}s before direct add uid={uid}"
+            )
+            await asyncio.sleep(e.seconds + 5)
+            try:
+                await client(functions.channels.InviteToChannelRequest(
+                    channel=target, users=[uid],
+                ))
+                return "direct", "success", ""
+            except Exception as e2:
+                return "direct", "fallback", f"flood_retry_failed: {e2}"
+        except Exception as e:
+            # Includes: TypeError: Cannot cast InputPeerChat to InputChannel
+            # and any other unexpected error — fall back to link.
+            return "direct", "fallback", f"{type(e).__name__}: {e}"
+
+    # ---- Legacy small Chat ----
+    if _is_basic_chat(target):
+        try:
+            await client(functions.messages.AddChatUserRequest(
+                chat_id=target.id, user_id=uid, fwd_limit=0,
+            ))
+            return "direct", "success", ""
+        except UserPrivacyRestrictedError:
+            return "direct", "fallback", "privacy_restricted"
+        except UserNotMutualContactError:
+            return "direct", "fallback", "not_mutual"
+        except UserChannelsTooMuchError:
+            return "direct", "failed", "user in too many channels"
+        except UserAlreadyParticipantError:
+            return "direct", "skipped", "already participant"
+        except UserKickedError:
+            return "direct", "failed", "user kicked from target"
+        except FloodWaitError as e:
+            log_bot.warning(
+                f"invite: flood wait {e.seconds}s before add_chat_user uid={uid}"
+            )
+            await asyncio.sleep(e.seconds + 5)
+            try:
+                await client(functions.messages.AddChatUserRequest(
+                    chat_id=target.id, user_id=uid, fwd_limit=0,
+                ))
+                return "direct", "success", ""
+            except Exception as e2:
+                return "direct", "fallback", f"flood_retry_failed: {e2}"
+        except Exception as e:
+            return "direct", "fallback", f"{type(e).__name__}: {e}"
+
+    # ---- Unknown type ----
+    return None, "failed", (
+        f"target is not a Channel or Chat (type={type(target).__name__})"
+    )
+
+
+# ===========================================================================
 # Invite link management
 # ===========================================================================
 class InviteLinkManager:
@@ -341,8 +466,11 @@ class InviteLinkManager:
 # Send helpers
 # ===========================================================================
 async def _send_invite_pv(client, uid: int, first_name: str,
-                          link: str) -> bool:
-    """Send an invite link via private message. Returns True on success."""
+                          link: str) -> tuple:
+    """Send an invite link via private message.
+
+    Returns (ok: bool, error: str).
+    """
     msg = (
         f"👋 Hi {first_name or 'there'}!\n\n"
         f"Join our group:\n{link}\n\n"
@@ -350,28 +478,23 @@ async def _send_invite_pv(client, uid: int, first_name: str,
     )
     try:
         await client.send_message(uid, msg)
-        return True
+        return True, ""
     except UserIsBlockedError:
-        log_bot.warning(f"invite: user {uid} has blocked this account")
-        return False
+        return False, "user has blocked this account"
     except YouBlockedUserError:
-        log_bot.warning(f"invite: this account has blocked user {uid}")
-        return False
+        return False, "this account has blocked the user"
     except InputUserDeactivatedError:
-        log_bot.warning(f"invite: user {uid} is deactivated")
-        return False
+        return False, "user is deactivated"
     except FloodWaitError as e:
         log_bot.warning(f"invite: flood wait {e.seconds}s sending to {uid}")
         await asyncio.sleep(e.seconds + 3)
         try:
             await client.send_message(uid, msg)
-            return True
+            return True, ""
         except Exception as e2:
-            log_bot.warning(f"invite: retry send to {uid} failed: {e2}")
-            return False
+            return False, f"retry_send_failed: {type(e2).__name__}: {e2}"
     except Exception as e:
-        log_bot.warning(f"invite: send to {uid} failed: {type(e).__name__}: {e}")
-        return False
+        return False, f"{type(e).__name__}: {e}"
 
 
 # ===========================================================================
@@ -389,11 +512,15 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
     if job["status"] == "done":
         raise ValueError(f"job {job_id} already finished")
 
-    _CANCEL_FLAGS.pop(job_id, None)
+    # Register a fresh cancel Event BEFORE marking the job as running
+    cancel_event = threading.Event()
+    _CANCEL_EVENTS[job_id] = cancel_event
+    log_bot.info(f"invite: runner registered for {job_id}")
 
     user_id = int(job["user_id"])
     client = runtime.user_clients.get(user_id)
     if client is None:
+        _CANCEL_EVENTS.pop(job_id, None)
         raise RuntimeError(f"no user client for uid={user_id}")
 
     db.update_invite_job(job_id, status="running",
@@ -421,6 +548,11 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
             target = await _resolve_chat(client, job["target_chat"])
         except Exception as e:
             raise RuntimeError(f"target chat resolve failed: {e}")
+
+        log_bot.info(
+            f"invite: target type={type(target).__name__} "
+            f"(is_channel={_is_channel(target)} is_chat={_is_basic_chat(target)})"
+        )
 
         # ---------- self-bot identity ----------
         try:
@@ -493,11 +625,11 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
         # ---------- main loop ----------
         sent_count = 0
         for i, member in enumerate(candidates, 1):
+            # --- STOP CHECK #1 ---
             if is_cancelled(job_id):
                 summary["cancelled"] = True
                 log_bot.info(
-                    f"invite: job {job_id} cancelled at "
-                    f"{i - 1}/{summary['total']}"
+                    f"invite: STOP detected at iteration {i - 1}/{summary['total']}"
                 )
                 break
 
@@ -507,13 +639,15 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
                     f"invite: rate-limit pause {RATE_LIMIT_PAUSE}s "
                     f"after {sent_count} sends"
                 )
-                try:
-                    for _ in range(RATE_LIMIT_PAUSE):
-                        if is_cancelled(job_id):
-                            break
-                        await asyncio.sleep(1)
-                except asyncio.CancelledError:
-                    raise
+                # pause in 1s chunks so stop can interrupt
+                for _ in range(RATE_LIMIT_PAUSE):
+                    if is_cancelled(job_id):
+                        summary["cancelled"] = True
+                        break
+                    await asyncio.sleep(1)
+                if summary["cancelled"]:
+                    log_bot.info("invite: STOP detected during rate-limit pause")
+                    break
 
             uid = member["user_id"]
             username = member["username"]
@@ -529,37 +663,7 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
 
             # ---------- 1. try direct add ----------
             try:
-                await client(functions.channels.InviteToChannelRequest(
-                    channel=target,
-                    users=[uid],
-                ))
-                method = "direct"
-                status = "success"
-                summary["added_directly"] += 1
-                log_bot.info(f"invite: direct add OK uid={uid}")
-            except UserPrivacyRestrictedError:
-                method = "link"
-                status = "success"
-                error = "privacy_restricted -> link"
-            except UserNotMutualContactError:
-                method = "link"
-                status = "success"
-                error = "not_mutual -> link"
-            except UserChannelsTooMuchError:
-                method = "direct"
-                status = "failed"
-                error = "user in too many channels"
-                summary["failed"] += 1
-            except UserAlreadyParticipantError:
-                method = "direct"
-                status = "skipped"
-                error = "already participant"
-                summary["skipped"] += 1
-            except UserKickedError:
-                method = "direct"
-                status = "failed"
-                error = "user kicked from target"
-                summary["failed"] += 1
+                method, status, error = await _try_direct_add(client, target, uid)
             except ChatAdminRequiredError:
                 raise RuntimeError(
                     "you must be admin in target chat with invite permission"
@@ -571,53 +675,58 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
                 )
             except UsersTooMuchError:
                 raise RuntimeError("too many users — try fewer at once")
-            except FloodWaitError as e:
-                log_bot.warning(
-                    f"invite: flood wait {e.seconds}s before direct add uid={uid}"
-                )
-                await asyncio.sleep(e.seconds + 5)
-                try:
-                    await client(functions.channels.InviteToChannelRequest(
-                        channel=target, users=[uid],
-                    ))
-                    method = "direct"
-                    status = "success"
-                    summary["added_directly"] += 1
-                except Exception as e2:
-                    method = "link"
-                    status = "success"
-                    error = f"flood -> link: {e2}"
             except Exception as e:
-                method = "link"
-                status = "success"
-                error = f"direct_failed: {type(e).__name__}"
-                log_bot.info(
-                    f"invite: direct add fallback to link uid={uid} "
-                    f"({type(e).__name__}: {e})"
+                log_bot.warning(
+                    f"invite: _try_direct_add unexpected error uid={uid}: "
+                    f"{type(e).__name__}: {e}"
                 )
+                method = "direct"
+                status = "fallback"
+                error = f"unexpected: {type(e).__name__}: {e}"
 
-            # ---------- 2. send link via PV ----------
-            if method == "link" and status == "success":
+            # tally direct result
+            if status == "success" and method == "direct":
+                summary["added_directly"] += 1
+                log_bot.info(f"invite: direct add OK uid={uid}")
+
+            elif status == "skipped":
+                summary["skipped"] += 1
+                log_bot.info(f"invite: skipped uid={uid} ({error})")
+
+            elif status == "failed":
+                summary["failed"] += 1
+                log_bot.warning(f"invite: failed uid={uid} ({error})")
+
+            # ---------- 2. fallback: send link via PV ----------
+            if status == "fallback":
                 try:
                     link = await link_mgr.get_link()
-                    ok = await _send_invite_pv(
+                    ok, send_err = await _send_invite_pv(
                         client, uid, first_name, link,
                     )
                     if ok:
                         await link_mgr.mark_used()
                         summary["sent_link"] += 1
                         sent_count += 1
+                        method = "link"
+                        status = "success"
+                        error = ""
                         log_bot.info(f"invite: link sent to uid={uid}")
                     else:
+                        method = "link"
                         status = "failed"
-                        error = "send link failed (blocked/deactivated)"
+                        error = f"send link failed: {send_err}"
                         summary["failed"] += 1
+                        log_bot.warning(
+                            f"invite: send link failed uid={uid}: {send_err}"
+                        )
                 except Exception as e:
+                    method = "link"
                     status = "failed"
-                    error = f"send link failed: {e}"
+                    error = f"link error: {type(e).__name__}: {e}"
                     summary["failed"] += 1
                     log_bot.warning(
-                        f"invite: send link failed uid={uid}: {e}"
+                        f"invite: link error uid={uid}: {e}"
                     )
 
             # ---------- 3. record ----------
@@ -651,19 +760,20 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
                 except Exception:
                     pass
 
+            # --- sleep between iterations, STOP CHECK #2 ---
             if i < summary["total"]:
                 remaining = delay
                 while remaining > 0:
                     if is_cancelled(job_id):
+                        summary["cancelled"] = True
                         break
                     step = min(1.0, remaining)
                     await asyncio.sleep(step)
                     remaining -= step
-                if is_cancelled(job_id):
-                    summary["cancelled"] = True
+                if summary["cancelled"]:
                     log_bot.info(
-                        f"invite: job {job_id} cancelled during delay "
-                        f"at {i}/{summary['total']}"
+                        f"invite: STOP detected during delay "
+                        f"at iteration {i}/{summary['total']}"
                     )
                     break
 
@@ -701,4 +811,5 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
         )
         return summary
     finally:
-        _CANCEL_FLAGS.pop(job_id, None)
+        _CANCEL_EVENTS.pop(job_id, None)
+        log_bot.info(f"invite: runner unregistered for {job_id}")
