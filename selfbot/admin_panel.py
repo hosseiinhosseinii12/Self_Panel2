@@ -1151,10 +1151,12 @@ code {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       Casino Access
     </a>
+    {% if has_invite_routes %}
     <a href="{{ url_for('invite_page') }}" class="nav-link {{ 'active' if page=='invite' else '' }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
       Invite
     </a>
+    {% endif %}
 
     <div class="nav-group">System</div>
     <a href="{{ url_for('shop_page') }}" class="nav-link {{ 'active' if page=='shop' else '' }}">
@@ -1994,8 +1996,25 @@ def build_admin_app() -> Flask:
         _csrf_token()
 
     def _render_page(title: str, body: str, page: str):
+        # Check if invite routes are registered — if not, hide the sidebar link
+        has_invite_routes = False
+        try:
+            from flask import current_app
+            _app = current_app._get_current_object()
+            for r in _app.url_map.iter_rules():
+                if r.endpoint == "invite_page":
+                    has_invite_routes = True
+                    break
+        except Exception:
+            pass
+
         return render_template_string(
-            BASE_TEMPLATE, title=title, body=body, page=page)
+            BASE_TEMPLATE,
+            title=title,
+            body=body,
+            page=page,
+            has_invite_routes=has_invite_routes,
+        )
 
     def _get_runtime_safe():
         try:
