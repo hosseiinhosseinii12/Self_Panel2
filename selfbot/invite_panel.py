@@ -56,6 +56,11 @@ INVITE_ADMIN_TEMPLATE = r"""
       The bot will try to add each member directly. If direct add fails
       (privacy settings), it will send them an invite link via PV.
       After 10 uses, the link is revoked and a new one is created.
+      <br><br>
+      <strong>Automatic exclusions:</strong>
+      bots, deleted accounts, the owner, the self-bot account, current
+      target members, <strong>admins of source</strong>, and
+      <strong>admins of target</strong> are all skipped automatically.
     </div>
 
     <div class="mt-4">
@@ -93,7 +98,9 @@ INVITE_ADMIN_TEMPLATE = r"""
         <td>
           {% if j.status == 'running' %}<span class="badge amber">running</span>
           {% elif j.status == 'done' %}<span class="badge green">done</span>
+          {% elif j.status == 'cancelled' %}<span class="badge purple">cancelled</span>
           {% elif j.status == 'failed' %}<span class="badge red">failed</span>
+          {% elif j.status == 'stopped' %}<span class="badge purple">stopped</span>
           {% else %}<span class="badge">{{ j.status }}</span>{% endif %}
         </td>
         <td class="mono text-right">{{ j.total_members }}</td>
@@ -134,7 +141,7 @@ INVITE_JOB_TEMPLATE = r"""
   <div class="page-actions">
     <a class="btn" href="{{ url_for('invite_page') }}">← Back</a>
 
-    {% if job.status in ('pending', 'failed') %}
+    {% if can_run %}
     <form method="post" action="{{ url_for('invite_job_run', job_id=job.id) }}"
           style="display:inline"
           onsubmit="return confirm('Start this job?');">
@@ -143,12 +150,21 @@ INVITE_JOB_TEMPLATE = r"""
     </form>
     {% endif %}
 
-    {% if job.status != 'running' %}
+    {% if can_cancel %}
+    <form method="post" action="{{ url_for('invite_job_cancel', job_id=job.id) }}"
+          style="display:inline"
+          onsubmit="return confirm('Stop this job? It will stop after the current member.');">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="btn btn-danger">⏹ Stop</button>
+    </form>
+    {% endif %}
+
+    {% if can_delete %}
     <form method="post" action="{{ url_for('invite_job_delete', job_id=job.id) }}"
           style="display:inline"
           onsubmit="return confirm('Delete this job and all its items?');">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button class="btn btn-danger">Delete</button>
+      <button class="btn btn-danger">🗑 Delete</button>
     </form>
     {% endif %}
   </div>
@@ -166,7 +182,9 @@ INVITE_JOB_TEMPLATE = r"""
     <div class="v" style="font-size:20px">
       {% if job.status == 'running' %}<span style="color:var(--amber)">running</span>
       {% elif job.status == 'done' %}<span style="color:var(--green)">done</span>
+      {% elif job.status == 'cancelled' %}<span style="color:var(--purple)">cancelled</span>
       {% elif job.status == 'failed' %}<span style="color:var(--red)">failed</span>
+      {% elif job.status == 'stopped' %}<span style="color:var(--purple)">stopped</span>
       {% else %}{{ job.status }}{% endif %}
     </div>
   </div>
@@ -191,6 +209,16 @@ INVITE_JOB_TEMPLATE = r"""
     <div class="v" style="color:var(--text-2)">{{ job.skipped }}</div>
   </div>
 </div>
+
+{% if job.status == 'running' %}
+<div class="card" style="border-color:var(--amber-border);background:var(--amber-bg)">
+  <div style="display:flex;align-items:center;gap:12px;color:var(--amber);font-size:13.5px;flex-wrap:wrap">
+    <span style="width:8px;height:8px;border-radius:50%;background:currentColor;animation:pulse 2s infinite"></span>
+    <strong>Job is running in the background.</strong>
+    <span>Refresh this page to see progress, or click <strong>⏹ Stop</strong> above to cancel.</span>
+  </div>
+</div>
+{% endif %}
 
 <div class="grid-2">
   <div class="card">
@@ -245,14 +273,54 @@ INVITE_JOB_TEMPLATE = r"""
       <strong>Last error:</strong> {{ job.last_error }}
     </div>
     {% endif %}
-
-    {% if job.status == 'running' %}
-    <div class="muted mt-3" style="font-size:12px">
-      Job is running in the background. Refresh this page to see updates.
-    </div>
-    {% endif %}
   </div>
 </div>
+
+{% if can_edit %}
+<div class="card">
+  <h2>Edit job</h2>
+  <p class="muted" style="font-size:12px;margin-bottom:16px">
+    Only <strong>pending</strong>, <strong>failed</strong>, or
+    <strong>cancelled</strong> jobs can be edited. Saving will reset the
+    job to <code>pending</code> so it can be run again.
+  </p>
+  <form method="post" action="{{ url_for('invite_job_edit', job_id=job.id) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+
+    <div class="field-row">
+      <div>
+        <label>Source chat</label>
+        <input type="text" name="source_chat"
+               value="{{ job.source_chat }}"
+               placeholder="e.g. -1001234567890 or @groupname">
+      </div>
+      <div>
+        <label>Target chat</label>
+        <input type="text" name="target_chat"
+               value="{{ job.target_chat }}"
+               placeholder="e.g. -1009876543210 or @target">
+      </div>
+    </div>
+
+    <div class="field-row mt-3">
+      <div>
+        <label>Batch size (1–10)</label>
+        <input type="number" name="batch_size"
+               value="{{ job.batch_size }}" min="1" max="10">
+      </div>
+      <div>
+        <label>Delay between adds (5–600 s)</label>
+        <input type="number" name="delay_seconds"
+               value="{{ job.delay_seconds }}" min="5" max="600">
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <button class="btn btn-primary">💾 Save changes</button>
+    </div>
+  </form>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>
@@ -315,7 +383,7 @@ INVITE_JOB_TEMPLATE = r"""
   <div class="empty">
     <div class="empty-icon">📥</div>
     No processed members yet.
-    {% if job.status in ('pending', 'failed') %}
+    {% if can_run %}
       Click "▶ Run job" above to start.
     {% endif %}
   </div>

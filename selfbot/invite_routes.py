@@ -98,7 +98,7 @@ def register_invite_admin_routes(app, login_required, csrf_check, csrf_token,
                      ip=request.remote_addr,
                      admin_name=current_admin_name(),
                      meta={"source": source, "target": target,
-                            "batch": batch, "delay": delay})
+                           "batch": batch, "delay": delay})
         flash(f"Job {job['id']} created.")
         return redirect(url_for("invite_job_detail", job_id=job["id"]))
 
@@ -115,11 +115,81 @@ def register_invite_admin_routes(app, login_required, csrf_check, csrf_token,
         _enrich_items(items)
         counts = db.invite_item_counts(job_id)
 
+        can_edit = (job.get("status") or "").lower() in IM.EDITABLE_STATUSES
+        can_run = can_edit
+        can_cancel = (job.get("status") or "").lower() == "running"
+        can_delete = (job.get("status") or "").lower() != "running"
+
         body = render_template_string(
             IP.INVITE_JOB_TEMPLATE,
             job=job, items=items, counts=counts, csrf=csrf_token(),
+            can_edit=can_edit, can_run=can_run,
+            can_cancel=can_cancel, can_delete=can_delete,
         )
         return render_page(f"Invite Job {job_id}", body, "invite")
+
+    @app.route("/admin/invite/<job_id>/edit", methods=["POST"])
+    @login_required
+    def invite_job_edit(job_id: str):
+        csrf_check()
+        job = IM.get_job(job_id)
+        if not job:
+            flash("Job not found.", "error")
+            return redirect(url_for("invite_page"))
+
+        source = request.form.get("source_chat")
+        target = request.form.get("target_chat")
+        batch_raw = request.form.get("batch_size")
+        delay_raw = request.form.get("delay_seconds")
+
+        batch = None
+        if batch_raw is not None and batch_raw.strip() != "":
+            try:
+                batch = int(batch_raw)
+            except ValueError:
+                flash("Batch size must be a number.", "error")
+                return redirect(url_for("invite_job_detail", job_id=job_id))
+
+        delay = None
+        if delay_raw is not None and delay_raw.strip() != "":
+            try:
+                delay = int(delay_raw)
+            except ValueError:
+                flash("Delay must be a number.", "error")
+                return redirect(url_for("invite_job_detail", job_id=job_id))
+
+        ok, err = IM.update_job(
+            job_id,
+            source_chat=source,
+            target_chat=target,
+            batch_size=batch,
+            delay_seconds=delay,
+        )
+        if not ok:
+            flash(err, "error")
+            return redirect(url_for("invite_job_detail", job_id=job_id))
+
+        audit_record(current_admin_id(), "invite_edit", target=job_id,
+                     ip=request.remote_addr,
+                     admin_name=current_admin_name(),
+                     meta={"source": source, "target": target,
+                           "batch": batch, "delay": delay})
+        flash("Job updated. Status reset to pending — ready to run.")
+        return redirect(url_for("invite_job_detail", job_id=job_id))
+
+    @app.route("/admin/invite/<job_id>/cancel", methods=["POST"])
+    @login_required
+    def invite_job_cancel(job_id: str):
+        csrf_check()
+        ok, msg = IM.cancel_job(job_id)
+        if ok:
+            audit_record(current_admin_id(), "invite_cancel", target=job_id,
+                         ip=request.remote_addr,
+                         admin_name=current_admin_name())
+            flash(msg)
+        else:
+            flash(msg, "error")
+        return redirect(url_for("invite_job_detail", job_id=job_id))
 
     @app.route("/admin/invite/<job_id>/run", methods=["POST"])
     @login_required
@@ -135,13 +205,14 @@ def register_invite_admin_routes(app, login_required, csrf_check, csrf_token,
             flash("Job not found.", "error")
             return redirect(url_for("invite_page"))
 
-        if job["status"] == "running":
+        status = (job.get("status") or "").lower()
+        if status == "running":
             flash("Job is already running.", "error")
             return redirect(url_for("invite_job_detail", job_id=job_id))
 
-        if job["status"] == "done":
+        if status == "done":
             flash(
-                "Job already finished. Create a new one or delete this.",
+                "Job already finished. Edit it (or create a new one) to run again.",
                 "error",
             )
             return redirect(url_for("invite_job_detail", job_id=job_id))
@@ -165,10 +236,19 @@ def register_invite_admin_routes(app, login_required, csrf_check, csrf_token,
     def invite_job_delete(job_id: str):
         csrf_check()
         job = IM.get_job(job_id)
-        if job and job["status"] == "running":
-            flash("Cannot delete a running job.", "error")
+        if not job:
+            flash("Job not found.", "error")
+            return redirect(url_for("invite_page"))
+
+        if (job.get("status") or "").lower() == "running":
+            flash("Cannot delete a running job. Cancel it first.", "error")
             return redirect(url_for("invite_job_detail", job_id=job_id))
-        IM.delete_job(job_id)
+
+        ok = IM.delete_job(job_id)
+        if not ok:
+            flash("Could not delete job.", "error")
+            return redirect(url_for("invite_job_detail", job_id=job_id))
+
         audit_record(current_admin_id(), "invite_delete", target=job_id,
                      ip=request.remote_addr,
                      admin_name=current_admin_name())
