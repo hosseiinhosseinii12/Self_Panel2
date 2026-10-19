@@ -45,17 +45,17 @@ INVITE_ADMIN_TEMPLATE = r"""
         <input type="number" name="batch_size" value="10" min="1" max="10">
       </div>
       <div>
-        <label>Delay between adds (seconds)</label>
-        <input type="number" name="delay_seconds" value="30" min="5" max="600">
+        <label>Delay between adds (0–600 seconds, 0 = instant)</label>
+        <input type="number" name="delay_seconds" value="5" min="0" max="600">
       </div>
     </div>
 
     <div class="muted mt-3" style="font-size:12px;line-height:1.6">
       <strong>How it works:</strong>
-      Each invite link can be used for at most <strong>10 people</strong>.
-      The bot will try to add each member directly. If direct add fails
-      (privacy settings), it will send them an invite link via PV.
-      After 10 uses, the link is revoked and a new one is created.
+      Each member is added <strong>directly</strong> to the target chat
+      (no invite links, no private messages).
+      Use <strong>delay=0</strong> to add many users as fast as possible
+      (~10 users per second).
       <br><br>
       <strong>Automatic exclusions:</strong>
       bots, deleted accounts, the owner, the self-bot account, current
@@ -83,8 +83,8 @@ INVITE_ADMIN_TEMPLATE = r"""
           <th>Status</th>
           <th class="text-right">Total</th>
           <th class="text-right">Direct</th>
-          <th class="text-right">Link</th>
           <th class="text-right">Failed</th>
+          <th class="text-right">Skipped</th>
           <th>Created (Tehran)</th>
           <th></th>
         </tr>
@@ -100,13 +100,12 @@ INVITE_ADMIN_TEMPLATE = r"""
           {% elif j.status == 'done' %}<span class="badge green">done</span>
           {% elif j.status == 'cancelled' %}<span class="badge purple">cancelled</span>
           {% elif j.status == 'failed' %}<span class="badge red">failed</span>
-          {% elif j.status == 'stopped' %}<span class="badge purple">stopped</span>
           {% else %}<span class="badge">{{ j.status }}</span>{% endif %}
         </td>
         <td class="mono text-right">{{ j.total_members }}</td>
         <td class="mono text-right" style="color:var(--green)">{{ j.added_directly }}</td>
-        <td class="mono text-right" style="color:var(--blue)">{{ j.sent_link }}</td>
         <td class="mono text-right" style="color:var(--red)">{{ j.failed }}</td>
+        <td class="mono text-right" style="color:var(--text-2)">{{ j.skipped }}</td>
         <td class="mono muted">{{ j.created_at_tehran }}</td>
         <td class="text-right">
           <a class="btn btn-sm" href="{{ url_for('invite_job_detail', job_id=j.id) }}">Open →</a>
@@ -153,7 +152,7 @@ INVITE_JOB_TEMPLATE = r"""
     {% if can_cancel %}
     <form method="post" action="{{ url_for('invite_job_cancel', job_id=job.id) }}"
           style="display:inline"
-          onsubmit="return confirm('Stop this job? It will stop after the current member.');">
+          onsubmit="return confirm('Stop this job? It will stop within ~0.1 second.');">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="btn btn-danger">⏹ Stop</button>
     </form>
@@ -184,7 +183,6 @@ INVITE_JOB_TEMPLATE = r"""
       {% elif job.status == 'done' %}<span style="color:var(--green)">done</span>
       {% elif job.status == 'cancelled' %}<span style="color:var(--purple)">cancelled</span>
       {% elif job.status == 'failed' %}<span style="color:var(--red)">failed</span>
-      {% elif job.status == 'stopped' %}<span style="color:var(--purple)">stopped</span>
       {% else %}{{ job.status }}{% endif %}
     </div>
   </div>
@@ -195,10 +193,6 @@ INVITE_JOB_TEMPLATE = r"""
   <div class="stat">
     <div class="k">Added directly</div>
     <div class="v" style="color:var(--green)">{{ job.added_directly }}</div>
-  </div>
-  <div class="stat">
-    <div class="k">Link sent</div>
-    <div class="v" style="color:var(--blue)">{{ job.sent_link }}</div>
   </div>
   <div class="stat">
     <div class="k">Failed</div>
@@ -254,10 +248,6 @@ INVITE_JOB_TEMPLATE = r"""
               <td class="mono text-right" style="color:var(--green)">
                 {{ counts.direct }}
               </td></tr>
-          <tr><td class="muted">Link sent</td>
-              <td class="mono text-right" style="color:var(--blue)">
-                {{ counts.link }}
-              </td></tr>
           <tr><td class="muted">Failed</td>
               <td class="mono text-right" style="color:var(--red)">
                 {{ counts.failed }}
@@ -309,9 +299,9 @@ INVITE_JOB_TEMPLATE = r"""
                value="{{ job.batch_size }}" min="1" max="10">
       </div>
       <div>
-        <label>Delay between adds (5–600 s)</label>
+        <label>Delay between adds (0–600 s, 0 = instant)</label>
         <input type="number" name="delay_seconds"
-               value="{{ job.delay_seconds }}" min="5" max="600">
+               value="{{ job.delay_seconds }}" min="0" max="600">
       </div>
     </div>
 
@@ -362,7 +352,6 @@ INVITE_JOB_TEMPLATE = r"""
         <td class="muted">{{ it.first_name or '—' }}</td>
         <td class="mono">
           {% if it.method == 'direct' %}<span class="badge green">direct</span>
-          {% elif it.method == 'link' %}<span class="badge blue">link</span>
           {% else %}<span class="badge">{{ it.method }}</span>{% endif %}
         </td>
         <td>

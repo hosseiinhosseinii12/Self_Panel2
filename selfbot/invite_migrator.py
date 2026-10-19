@@ -4,22 +4,20 @@ Workflow:
   1. List all members of source_chat.
   2. Exclude: bots, deleted, owner, self-bot account, target members,
      admins of source, admins of target.
-  3. For each remaining user:
-       a. Try direct add (InviteToChannel for Channels/supergroups,
-          AddChatUser for legacy small groups).
-       b. If direct add fails (privacy / not mutual / cast error),
-          send invite link via PV.
-       c. If send link fails (blocked), mark as failed.
-  4. Each invite link is used for AT MOST `batch_size` (default 10) users.
-  5. After that, revoke and create a new invite link.
-  6. Delay between actions to avoid FloodWait.
-  7. Adaptive rate-limit: pause every N successful sends.
+  3. For each remaining user, ONLY try to add directly:
+       - Channel (supergroup / broadcast) → InviteToChannelRequest
+       - Chat (legacy small group)        → AddChatUserRequest
+  4. NO fallback to sending invite links. If direct add fails, mark as
+     skipped (privacy / not mutual) or failed (other errors).
+  5. Delay between adds can be 0 (instant, one per ~0.1s) up to 600s.
+     Default is still 30s to be safe, but you can set it to 0 if you
+     want to add many users very fast.
+  6. Adaptive rate-limit: every N successful adds, pause for a bit.
 
 Cancellation:
   - A running job can be cancelled via `cancel_job(job_id)` which sets a
-    `threading.Event`. The run loop checks `is_cancelled(job_id)` at the
-    top of every iteration and also between small sleep chunks, so it can
-    stop within ~1 second after the request.
+    threading.Event. The run loop checks it at the top of every iteration
+    and between 0.1s sleep chunks, so Stop takes effect within ~0.1s.
 """
 import asyncio
 import secrets
@@ -56,19 +54,19 @@ except ImportError:
 # ===========================================================================
 DEFAULT_BATCH_SIZE = 10
 MAX_BATCH_SIZE = 10
-DEFAULT_DELAY = 30
-MIN_DELAY = 5
+
+# Delay between adds can be ZERO (instant) or up to 10 minutes.
+DEFAULT_DELAY = 5
+MIN_DELAY = 0
 MAX_DELAY = 600
 
-# After N successful sends, pause for RATE_LIMIT_PAUSE seconds
+# After N successful adds, pause for RATE_LIMIT_PAUSE seconds.
 RATE_LIMIT_AFTER_N = 30
-RATE_LIMIT_PAUSE = 60
+RATE_LIMIT_PAUSE = 30
 
 LINK_TTL_HOURS = 24
 
 # In-memory cancel events: {job_id: threading.Event}
-# threading.Event is thread-safe, so the Flask request thread and the
-# asyncio loop thread can safely share it.
 _CANCEL_EVENTS: dict = {}
 
 
@@ -208,11 +206,6 @@ def update_job(job_id: str, source_chat: Optional[str] = None,
 # Cancel (Stop)
 # ===========================================================================
 def cancel_job(job_id: str) -> tuple:
-    """Request cancellation of a running job.
-
-    Uses threading.Event, which is atomic and safe to set from a Flask
-    request thread while the asyncio loop thread checks it.
-    """
     job = db.get_invite_job(job_id)
     if not job:
         return False, "Job not found."
@@ -223,8 +216,6 @@ def cancel_job(job_id: str) -> tuple:
 
     ev = _CANCEL_EVENTS.get(job_id)
     if ev is None:
-        # The runner hasn't registered its event yet (or it's between runs).
-        # Try DB-only fallback: mark a flag row? For now: fail with a clear msg.
         log_bot.warning(
             f"invite: cancel requested for {job_id} but no Event registered"
         )
@@ -235,7 +226,7 @@ def cancel_job(job_id: str) -> tuple:
 
     ev.set()
     log_bot.info(f"invite: STOP event SET for job {job_id}")
-    return True, "Stop requested. The job will halt within ~1 second."
+    return True, "Stop requested. The job will halt within ~0.1 second."
 
 
 def is_cancelled(job_id: str) -> bool:
@@ -305,7 +296,6 @@ async def _list_members(client, chat, max_count: int = 5000) -> list:
 
 
 async def _list_admins(client, chat) -> set:
-    """Return set of user_ids who are admins/creator in the chat."""
     admin_ids = set()
     try:
         async for user in client.iter_participants(
@@ -319,14 +309,14 @@ async def _list_admins(client, chat) -> set:
 
 
 # ===========================================================================
-# Direct-add helpers (handles both Channel and legacy Chat)
+# Direct-add helper — NO fallback to link
 # ===========================================================================
 async def _try_direct_add(client, target, uid: int) -> tuple:
-    """Try to add a user directly.
+    """Try to add a user directly to target.
 
     Returns (method, status, error):
       - method: 'direct' if any add attempt was made, else None
-      - status: 'success' / 'failed' / 'skipped' / 'fallback'
+      - status: 'success' / 'failed' / 'skipped'
       - error:  human-readable error string (or '')
     """
     # ---- Channel (supergroup / broadcast) ----
@@ -337,9 +327,9 @@ async def _try_direct_add(client, target, uid: int) -> tuple:
             ))
             return "direct", "success", ""
         except UserPrivacyRestrictedError:
-            return "direct", "fallback", "privacy_restricted"
+            return "direct", "skipped", "privacy_restricted"
         except UserNotMutualContactError:
-            return "direct", "fallback", "not_mutual"
+            return "direct", "skipped", "not_mutual"
         except UserChannelsTooMuchError:
             return "direct", "failed", "user in too many channels"
         except UserAlreadyParticipantError:
@@ -357,11 +347,9 @@ async def _try_direct_add(client, target, uid: int) -> tuple:
                 ))
                 return "direct", "success", ""
             except Exception as e2:
-                return "direct", "fallback", f"flood_retry_failed: {e2}"
+                return "direct", "failed", f"flood_retry_failed: {e2}"
         except Exception as e:
-            # Includes: TypeError: Cannot cast InputPeerChat to InputChannel
-            # and any other unexpected error — fall back to link.
-            return "direct", "fallback", f"{type(e).__name__}: {e}"
+            return "direct", "failed", f"{type(e).__name__}: {e}"
 
     # ---- Legacy small Chat ----
     if _is_basic_chat(target):
@@ -371,9 +359,9 @@ async def _try_direct_add(client, target, uid: int) -> tuple:
             ))
             return "direct", "success", ""
         except UserPrivacyRestrictedError:
-            return "direct", "fallback", "privacy_restricted"
+            return "direct", "skipped", "privacy_restricted"
         except UserNotMutualContactError:
-            return "direct", "fallback", "not_mutual"
+            return "direct", "skipped", "not_mutual"
         except UserChannelsTooMuchError:
             return "direct", "failed", "user in too many channels"
         except UserAlreadyParticipantError:
@@ -391,110 +379,14 @@ async def _try_direct_add(client, target, uid: int) -> tuple:
                 ))
                 return "direct", "success", ""
             except Exception as e2:
-                return "direct", "fallback", f"flood_retry_failed: {e2}"
+                return "direct", "failed", f"flood_retry_failed: {e2}"
         except Exception as e:
-            return "direct", "fallback", f"{type(e).__name__}: {e}"
+            return "direct", "failed", f"{type(e).__name__}: {e}"
 
     # ---- Unknown type ----
     return None, "failed", (
         f"target is not a Channel or Chat (type={type(target).__name__})"
     )
-
-
-# ===========================================================================
-# Invite link management
-# ===========================================================================
-class InviteLinkManager:
-    def __init__(self, client, target_chat, batch_size: int = 10,
-                 ttl_hours: int = LINK_TTL_HOURS):
-        self.client = client
-        self.target_chat = target_chat
-        self.batch_size = min(MAX_BATCH_SIZE, max(1, int(batch_size)))
-        self.ttl_seconds = ttl_hours * 3600
-        self.current_link: Optional[str] = None
-        self.current_uses: int = 0
-        self._lock = asyncio.Lock()
-
-    async def _create_link(self) -> str:
-        try:
-            result = await self.client(functions.messages.ExportChatInviteRequest(
-                peer=self.target_chat,
-                usage_limit=self.batch_size,
-                expire_date=int(datetime.now(dt_timezone.utc).timestamp()) +
-                             self.ttl_seconds,
-                title=f"batch-{secrets.token_hex(3)}",
-            ))
-            link = result.link
-            log_bot.info(
-                f"invite: created link (limit={self.batch_size}) {link[:40]}..."
-            )
-            return link
-        except Exception as e:
-            log_bot.error(f"invite: create link failed: {e}")
-            raise
-
-    async def _revoke_link(self, link: str) -> None:
-        try:
-            await self.client(functions.messages.EditExportedChatInviteRequest(
-                peer=self.target_chat,
-                link=link,
-                revoked=True,
-            ))
-            log_bot.info(f"invite: revoked link {link[:40]}...")
-        except Exception as e:
-            log_bot.warning(f"invite: revoke link failed: {e}")
-
-    async def get_link(self) -> str:
-        async with self._lock:
-            if (self.current_link is None or
-                    self.current_uses >= self.batch_size):
-                if self.current_link:
-                    await self._revoke_link(self.current_link)
-                self.current_link = await self._create_link()
-                self.current_uses = 0
-            return self.current_link
-
-    async def mark_used(self) -> None:
-        async with self._lock:
-            self.current_uses += 1
-            log_bot.info(
-                f"invite: link used {self.current_uses}/{self.batch_size}"
-            )
-
-
-# ===========================================================================
-# Send helpers
-# ===========================================================================
-async def _send_invite_pv(client, uid: int, first_name: str,
-                          link: str) -> tuple:
-    """Send an invite link via private message.
-
-    Returns (ok: bool, error: str).
-    """
-    msg = (
-        f"👋 Hi {first_name or 'there'}!\n\n"
-        f"Join our group:\n{link}\n\n"
-        f"This link works for a limited number of people."
-    )
-    try:
-        await client.send_message(uid, msg)
-        return True, ""
-    except UserIsBlockedError:
-        return False, "user has blocked this account"
-    except YouBlockedUserError:
-        return False, "this account has blocked the user"
-    except InputUserDeactivatedError:
-        return False, "user is deactivated"
-    except FloodWaitError as e:
-        log_bot.warning(f"invite: flood wait {e.seconds}s sending to {uid}")
-        await asyncio.sleep(e.seconds + 3)
-        try:
-            await client.send_message(uid, msg)
-            return True, ""
-        except Exception as e2:
-            return False, f"retry_send_failed: {type(e2).__name__}: {e2}"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
 
 
 # ===========================================================================
@@ -512,7 +404,6 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
     if job["status"] == "done":
         raise ValueError(f"job {job_id} already finished")
 
-    # Register a fresh cancel Event BEFORE marking the job as running
     cancel_event = threading.Event()
     _CANCEL_EVENTS[job_id] = cancel_event
     log_bot.info(f"invite: runner registered for {job_id}")
@@ -530,7 +421,7 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
     summary = {
         "total": 0,
         "added_directly": 0,
-        "sent_link": 0,
+        "sent_link": 0,   # kept for schema compatibility; always 0 now
         "failed": 0,
         "skipped": 0,
         "cancelled": False,
@@ -615,15 +506,11 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
             )
             return summary
 
-        link_mgr = InviteLinkManager(
-            client, target,
-            batch_size=job.get("batch_size", DEFAULT_BATCH_SIZE),
-        )
         delay = max(MIN_DELAY, min(MAX_DELAY,
                                    int(job.get("delay_seconds", DEFAULT_DELAY))))
 
         # ---------- main loop ----------
-        sent_count = 0
+        success_count = 0
         for i, member in enumerate(candidates, 1):
             # --- STOP CHECK #1 ---
             if is_cancelled(job_id):
@@ -633,13 +520,12 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
                 )
                 break
 
-            # adaptive rate-limiting: pause every N successful sends
-            if sent_count > 0 and sent_count % RATE_LIMIT_AFTER_N == 0:
+            # adaptive rate-limit: pause every N successful adds
+            if success_count > 0 and success_count % RATE_LIMIT_AFTER_N == 0:
                 log_bot.info(
                     f"invite: rate-limit pause {RATE_LIMIT_PAUSE}s "
-                    f"after {sent_count} sends"
+                    f"after {success_count} successful adds"
                 )
-                # pause in 1s chunks so stop can interrupt
                 for _ in range(RATE_LIMIT_PAUSE):
                     if is_cancelled(job_id):
                         summary["cancelled"] = True
@@ -661,7 +547,6 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
             status = None
             error = ""
 
-            # ---------- 1. try direct add ----------
             try:
                 method, status, error = await _try_direct_add(client, target, uid)
             except ChatAdminRequiredError:
@@ -681,55 +566,22 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
                     f"{type(e).__name__}: {e}"
                 )
                 method = "direct"
-                status = "fallback"
+                status = "failed"
                 error = f"unexpected: {type(e).__name__}: {e}"
 
-            # tally direct result
-            if status == "success" and method == "direct":
+            # tally
+            if status == "success":
                 summary["added_directly"] += 1
+                success_count += 1
                 log_bot.info(f"invite: direct add OK uid={uid}")
-
             elif status == "skipped":
                 summary["skipped"] += 1
                 log_bot.info(f"invite: skipped uid={uid} ({error})")
-
             elif status == "failed":
                 summary["failed"] += 1
                 log_bot.warning(f"invite: failed uid={uid} ({error})")
 
-            # ---------- 2. fallback: send link via PV ----------
-            if status == "fallback":
-                try:
-                    link = await link_mgr.get_link()
-                    ok, send_err = await _send_invite_pv(
-                        client, uid, first_name, link,
-                    )
-                    if ok:
-                        await link_mgr.mark_used()
-                        summary["sent_link"] += 1
-                        sent_count += 1
-                        method = "link"
-                        status = "success"
-                        error = ""
-                        log_bot.info(f"invite: link sent to uid={uid}")
-                    else:
-                        method = "link"
-                        status = "failed"
-                        error = f"send link failed: {send_err}"
-                        summary["failed"] += 1
-                        log_bot.warning(
-                            f"invite: send link failed uid={uid}: {send_err}"
-                        )
-                except Exception as e:
-                    method = "link"
-                    status = "failed"
-                    error = f"link error: {type(e).__name__}: {e}"
-                    summary["failed"] += 1
-                    log_bot.warning(
-                        f"invite: link error uid={uid}: {e}"
-                    )
-
-            # ---------- 3. record ----------
+            # record
             try:
                 db.add_invite_item({
                     "job_id": job_id,
@@ -761,21 +613,30 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
                     pass
 
             # --- sleep between iterations, STOP CHECK #2 ---
+            # If delay == 0 → tiny 0.1s pause just to yield to the event loop
+            # and let Telegram pacing keep up. If delay > 0 → sleep in 0.1s
+            # chunks so Stop works almost instantly even at high delays.
             if i < summary["total"]:
-                remaining = delay
-                while remaining > 0:
+                if delay <= 0:
                     if is_cancelled(job_id):
                         summary["cancelled"] = True
                         break
-                    step = min(1.0, remaining)
-                    await asyncio.sleep(step)
-                    remaining -= step
-                if summary["cancelled"]:
-                    log_bot.info(
-                        f"invite: STOP detected during delay "
-                        f"at iteration {i}/{summary['total']}"
-                    )
-                    break
+                    await asyncio.sleep(0.1)
+                else:
+                    remaining = float(delay)
+                    while remaining > 0:
+                        if is_cancelled(job_id):
+                            summary["cancelled"] = True
+                            break
+                        step = min(0.1, remaining)
+                        await asyncio.sleep(step)
+                        remaining -= step
+                    if summary["cancelled"]:
+                        log_bot.info(
+                            f"invite: STOP detected during delay "
+                            f"at iteration {i}/{summary['total']}"
+                        )
+                        break
 
         final_status = "cancelled" if summary["cancelled"] else "done"
 
@@ -792,7 +653,6 @@ async def run_job(runtime, job_id: str, progress_cb=None) -> dict:
         log_bot.info(
             f"invite: job {job_id} {final_status.upper()}. "
             f"direct={summary['added_directly']} "
-            f"link={summary['sent_link']} "
             f"failed={summary['failed']} "
             f"skipped={summary['skipped']}"
         )
