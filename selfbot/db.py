@@ -50,9 +50,6 @@ def tx():
         raise
 
 
-# ===========================================================================
-# SCHEMA — only CREATE TABLE + basic indexes (no column-dependent indexes)
-# ===========================================================================
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -235,6 +232,10 @@ CREATE TABLE IF NOT EXISTS text_format_settings (
     updated_at TEXT DEFAULT ''
 );
 
+-- =====================================================================
+-- Casino automator tables
+-- =====================================================================
+
 CREATE TABLE IF NOT EXISTS casino_config (
     user_id INTEGER PRIMARY KEY,
     enabled INTEGER DEFAULT 0,
@@ -296,11 +297,49 @@ CREATE TABLE IF NOT EXISTS casino_logs (
     created_at TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_casino_logs_user ON casino_logs(user_id);
+
+-- =====================================================================
+-- Invite migrator tables
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS invite_jobs (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    source_chat TEXT,
+    target_chat TEXT,
+    batch_size INTEGER DEFAULT 10,
+    delay_seconds INTEGER DEFAULT 30,
+    status TEXT DEFAULT 'pending',
+    total_members INTEGER DEFAULT 0,
+    added_directly INTEGER DEFAULT 0,
+    sent_link INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    skipped INTEGER DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    created_at TEXT DEFAULT '',
+    started_at TEXT DEFAULT '',
+    finished_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invite_jobs_user ON invite_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_invite_jobs_status ON invite_jobs(status);
+
+CREATE TABLE IF NOT EXISTS invite_job_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT,
+    target_user_id INTEGER,
+    username TEXT DEFAULT '',
+    first_name TEXT DEFAULT '',
+    method TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    error TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invite_items_job ON invite_job_items(job_id);
+CREATE INDEX IF NOT EXISTS idx_invite_items_status ON invite_job_items(job_id, status);
 """
 
 
 def _add_column_if_missing(conn, table: str, col: str, decl: str) -> None:
-    """Safely add a column. Ignores errors."""
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     except Exception:
@@ -311,11 +350,8 @@ def init_db() -> None:
     global _initialized
     with _init_lock:
         conn = get_conn()
-
-        # 1) Execute base schema (tables + basic indexes)
         conn.executescript(SCHEMA)
 
-        # 2) users: ensure newer columns exist (before any column-dependent index)
         cur = conn.execute("PRAGMA table_info(users)")
         cols = {row["name"] for row in cur.fetchall()}
         wanted = {
@@ -337,7 +373,6 @@ def init_db() -> None:
             if col not in cols:
                 _add_column_if_missing(conn, "users", col, decl)
 
-        # 3) casino_config: ensure newer columns exist
         cur = conn.execute("PRAGMA table_info(casino_config)")
         ccols = {row["name"] for row in cur.fetchall()}
         cwanted = {
@@ -357,14 +392,9 @@ def init_db() -> None:
             if col not in ccols:
                 _add_column_if_missing(conn, "casino_config", col, decl)
 
-        # 4) Column-dependent indexes (must run AFTER the ALTER TABLE above,
-        #    because CREATE TABLE IF NOT EXISTS does NOT add new columns to
-        #    an existing table.)
         for idx_sql in (
             "CREATE INDEX IF NOT EXISTS idx_users_casino_unlocked "
             "ON users(casino_unlocked)",
-            "CREATE INDEX IF NOT EXISTS idx_req_type "
-            "ON requests(type)",
         ):
             try:
                 conn.execute(idx_sql)
@@ -474,7 +504,7 @@ def find_user_by_username(username: str) -> Optional[int]:
 
 
 # ===========================================================================
-# Casino access lock
+# Casino access
 # ===========================================================================
 def is_casino_unlocked(user_id: int) -> bool:
     u = get_user(user_id)
@@ -1142,3 +1172,130 @@ def clear_casino_logs(user_id: int) -> None:
     _ensure_ready()
     conn = get_conn()
     conn.execute("DELETE FROM casino_logs WHERE user_id = ?", (int(user_id),))
+
+
+# ===========================================================================
+# Invite jobs
+# ===========================================================================
+def create_invite_job(job: dict) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO invite_jobs
+           (id, user_id, source_chat, target_chat, batch_size, delay_seconds,
+            status, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            job["id"], int(job["user_id"]),
+            str(job["source_chat"]), str(job["target_chat"]),
+            int(job.get("batch_size", 10)),
+            int(job.get("delay_seconds", 30)),
+            job.get("status", "pending"),
+            job.get("created_at", datetime.now(dt_timezone.utc).isoformat()),
+        ),
+    )
+
+
+def get_invite_job(job_id: str) -> Optional[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM invite_jobs WHERE id = ?",
+                       (job_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_invite_jobs(user_id: Optional[int] = None,
+                      limit: int = 100) -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    if user_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM invite_jobs WHERE user_id = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (int(user_id), int(limit)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM invite_jobs ORDER BY created_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_invite_job(job_id: str, **fields) -> None:
+    if not fields:
+        return
+    _ensure_ready()
+    conn = get_conn()
+    sets = []
+    vals = []
+    for k, v in fields.items():
+        sets.append(f"{k} = ?")
+        vals.append(v)
+    vals.append(job_id)
+    conn.execute(f"UPDATE invite_jobs SET {','.join(sets)} WHERE id = ?", vals)
+
+
+def delete_invite_job(job_id: str) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute("DELETE FROM invite_job_items WHERE job_id = ?", (job_id,))
+    conn.execute("DELETE FROM invite_jobs WHERE id = ?", (job_id,))
+
+
+def add_invite_item(item: dict) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO invite_job_items
+           (job_id, target_user_id, username, first_name, method, status,
+            error, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            item["job_id"], int(item["target_user_id"]),
+            item.get("username", ""), item.get("first_name", ""),
+            item.get("method", ""),
+            item.get("status", "pending"),
+            item.get("error", ""),
+            item.get("created_at", datetime.now(dt_timezone.utc).isoformat()),
+        ),
+    )
+
+
+def list_invite_items(job_id: str, limit: int = 500) -> List[dict]:
+    _ensure_ready()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM invite_job_items WHERE job_id = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (job_id, int(limit)),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def invite_item_counts(job_id: str) -> dict:
+    _ensure_ready()
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT
+             COUNT(*) AS total,
+             SUM(CASE WHEN method = 'direct' AND status = 'success' THEN 1 ELSE 0 END) AS direct,
+             SUM(CASE WHEN method = 'link' AND status = 'success' THEN 1 ELSE 0 END) AS link,
+             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+           FROM invite_job_items WHERE job_id = ?""",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return {"total": 0, "direct": 0, "link": 0, "failed": 0}
+    return {
+        "total": int(row["total"] or 0),
+        "direct": int(row["direct"] or 0),
+        "link": int(row["link"] or 0),
+        "failed": int(row["failed"] or 0),
+    }
+
+
+def clear_invite_items(job_id: str) -> None:
+    _ensure_ready()
+    conn = get_conn()
+    conn.execute("DELETE FROM invite_job_items WHERE job_id = ?", (job_id,))
